@@ -1,0 +1,227 @@
+from django.contrib.auth.models import User
+from django.core.validators import MinValueValidator
+from django.db import models
+from django.urls import reverse
+from django.utils import timezone
+
+
+class Organization(models.Model):
+    class Kind(models.TextChoices):
+        CUSTOMER = "customer", "Заказчик"
+        SUPPLIER = "supplier", "Поставщик"
+
+    name = models.CharField("Название", max_length=200)
+    kind = models.CharField("Тип", max_length=16, choices=Kind.choices)
+    inn = models.CharField("ИНН", max_length=12, blank=True)
+    kpp = models.CharField("КПП", max_length=9, blank=True)
+    legal_address = models.CharField("Юридический адрес", max_length=300, blank=True)
+    contact_email = models.EmailField("Контактный email", blank=True)
+    phone = models.CharField("Телефон", max_length=32, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
+class Membership(models.Model):
+    class Role(models.TextChoices):
+        OWNER = "owner", "Владелец"
+        MANAGER = "manager", "Менеджер"
+        REVIEWER = "reviewer", "Эксперт"
+
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="memberships")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="memberships")
+    role = models.CharField(max_length=16, choices=Role.choices, default=Role.OWNER)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "user"], name="one_membership_per_org")
+        ]
+
+
+class Profile(models.Model):
+    class Role(models.TextChoices):
+        CUSTOMER = "customer", "Заказчик"
+        SUPPLIER = "supplier", "Поставщик"
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    role = models.CharField(max_length=16, choices=Role.choices)
+    company_name = models.CharField("Компания", max_length=200)
+    inn = models.CharField("ИНН", max_length=12, blank=True)
+    phone = models.CharField("Телефон", max_length=32, blank=True)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.SET_NULL, null=True, blank=True, related_name="profiles"
+    )
+
+    def __str__(self):
+        return self.company_name
+
+
+class Tender(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        PUBLISHED = "published", "Прием заявок"
+        REVIEW = "review", "Рассмотрение"
+        COMPLETED = "completed", "Завершен"
+        CANCELLED = "cancelled", "Отменен"
+
+    class Category(models.TextChoices):
+        GOODS = "goods", "Товары"
+        SERVICES = "services", "Услуги"
+        CONSTRUCTION = "construction", "Строительство"
+        IT = "it", "ИТ и телеком"
+        OTHER = "other", "Другое"
+
+    class Procedure(models.TextChoices):
+        CLOSED = "closed", "Закрытый конкурс"
+        AUCTION = "auction", "Открытый аукцион"
+
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tenders")
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, null=True, blank=True, related_name="tenders"
+    )
+    title = models.CharField("Название", max_length=250)
+    number = models.CharField("Номер", max_length=40, unique=True)
+    category = models.CharField("Категория", max_length=20, choices=Category.choices)
+    description = models.TextField("Описание")
+    requirements = models.TextField("Требования к поставщику", blank=True)
+    delivery_address = models.CharField("Место поставки", max_length=300)
+    budget = models.DecimalField(
+        "Начальная цена", max_digits=14, decimal_places=2, validators=[MinValueValidator(0)]
+    )
+    deadline = models.DateTimeField("Окончание приема заявок")
+    procedure = models.CharField(
+        "Формат процедуры", max_length=16, choices=Procedure.choices, default=Procedure.CLOSED
+    )
+    auction_step = models.DecimalField(
+        "Шаг аукциона", max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    publish_results = models.BooleanField("Публиковать результаты", default=True)
+    favorites = models.ManyToManyField(User, blank=True, related_name="favorite_tenders")
+    status = models.CharField("Статус", max_length=16, choices=Status.choices, default=Status.DRAFT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.number}: {self.title}"
+
+    def get_absolute_url(self):
+        return reverse("tender_detail", kwargs={"pk": self.pk})
+
+    @property
+    def is_open(self):
+        return self.status == self.Status.PUBLISHED and self.deadline > timezone.now()
+
+    @property
+    def best_price(self):
+        return self.bids.aggregate(models.Min("price"))["price__min"]
+
+
+class TenderLot(models.Model):
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="lots")
+    title = models.CharField("Название лота", max_length=250)
+    description = models.TextField("Описание", blank=True)
+    quantity = models.DecimalField("Количество", max_digits=12, decimal_places=2, default=1)
+    unit = models.CharField("Единица измерения", max_length=30, default="шт.")
+    budget = models.DecimalField("Начальная цена", max_digits=14, decimal_places=2)
+
+    def __str__(self):
+        return self.title
+
+
+class TenderDocument(models.Model):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Всем участникам"
+        CUSTOMER = "customer", "Только заказчику"
+
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="documents")
+    title = models.CharField("Название", max_length=200)
+    file = models.FileField("Файл", upload_to="tenders/%Y/%m/")
+    visibility = models.CharField(max_length=16, choices=Visibility.choices, default=Visibility.PUBLIC)
+    uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+
+class SupplierApplication(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "На проверке"
+        APPROVED = "approved", "Аккредитован"
+        REJECTED = "rejected", "Отклонен"
+
+    organization = models.OneToOneField(
+        Organization, on_delete=models.CASCADE, related_name="supplier_application"
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    comment = models.TextField("Комментарий", blank=True)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+
+class Question(models.Model):
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="questions")
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="questions")
+    text = models.TextField("Вопрос")
+    answer = models.TextField("Ответ", blank=True)
+    answered_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="answered_questions"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+
+class Notification(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
+    title = models.CharField(max_length=200)
+    message = models.TextField(blank=True)
+    url = models.CharField(max_length=300, blank=True)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class AuditEvent(models.Model):
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    organization = models.ForeignKey(Organization, on_delete=models.SET_NULL, null=True, blank=True)
+    action = models.CharField(max_length=100)
+    object_type = models.CharField(max_length=100, blank=True)
+    object_id = models.CharField(max_length=64, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class Bid(models.Model):
+    class Status(models.TextChoices):
+        SUBMITTED = "submitted", "Подана"
+        WINNER = "winner", "Победитель"
+        REJECTED = "rejected", "Не выбрана"
+
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="bids")
+    supplier = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bids")
+    price = models.DecimalField(
+        "Цена предложения", max_digits=14, decimal_places=2, validators=[MinValueValidator(0)]
+    )
+    delivery_days = models.PositiveIntegerField("Срок поставки, дней")
+    warranty_months = models.PositiveIntegerField("Гарантия, месяцев", default=0)
+    comment = models.TextField("Комментарий", blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.SUBMITTED)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["price", "delivery_days"]
+        constraints = [
+            models.UniqueConstraint(fields=["tender", "supplier"], name="one_bid_per_supplier")
+        ]
+
+    def __str__(self):
+        return f"{self.supplier} → {self.tender.number}"

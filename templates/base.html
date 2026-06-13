@@ -1,0 +1,18 @@
+{% load static %}
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}TenderFlow{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{% static 'css/app.css' %}"><script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head><body>
+<div class="topline"><div class="container"><span>Цифровая закупочная платформа</span><span>Поддержка: +7 800 555-24-24</span></div></div>
+<header><div class="container nav">
+<a class="brand" href="{% url 'home' %}"><span>TF</span><b>TenderFlow</b></a>
+<nav><a href="{% url 'tender_list' %}">Закупки</a>{% if current_profile.role == 'customer' %}<a href="{% url 'supplier_registry' %}">Поставщики</a>{% endif %}<a href="{% url 'dashboard' %}">Аналитика</a></nav>
+<div class="account">{% if user.is_authenticated %}<a class="bell" href="{% url 'notifications' %}">Уведомления{% if unread_notifications %}<i>{{ unread_notifications }}</i>{% endif %}</a><a href="{% url 'dashboard' %}">{{ current_profile.company_name|truncatechars:18 }}</a><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="link-btn">Выйти</button></form>{% else %}<a href="{% url 'login' %}">Войти</a><a class="btn small" href="{% url 'register' %}">Регистрация</a>{% endif %}</div>
+</div></header>
+{% if messages %}<div class="messages">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+<main>{% block content %}{% endblock %}</main>
+<footer><div class="container footer"><div><div class="brand inverse"><span>TF</span><b>TenderFlow</b></div><p>Прозрачные корпоративные закупки</p></div><div><b>Платформа</b><a href="{% url 'tender_list' %}">Закупки</a><a href="{% url 'register' %}">Регистрация</a></div><div><b>Контакты</b><span>support@tenderflow.ru</span><span>Пн–Пт, 09:00–18:00</span></div></div></footer>
+</body></html>

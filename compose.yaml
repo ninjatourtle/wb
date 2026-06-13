@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:17-alpine
+    env_file: .env
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tenderflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    volumes: [redis_data:/data]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    env_file: .env
+    volumes: [minio_data:/data]
+    ports: ["9001:9001"]
+
+  createbucket:
+    image: minio/mc:latest
+    depends_on: [minio]
+    env_file: .env
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 2; done;
+      mc mb --ignore-existing local/$$AWS_STORAGE_BUCKET_NAME; exit 0;"
+
+  web:
+    build: .
+    env_file: .env
+    command: sh -c "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn tenderhub.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+    volumes: [static_data:/app/staticfiles]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+      minio: {condition: service_started}
+
+  worker:
+    build: .
+    env_file: .env
+    command: celery -A tenderhub worker -l info
+    depends_on: [db, redis]
+
+  beat:
+    build: .
+    env_file: .env
+    command: celery -A tenderhub beat -l info
+    depends_on: [db, redis]
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["8000:80"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_data:/static:ro
+    depends_on: [web]
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  static_data:

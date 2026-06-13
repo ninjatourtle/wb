@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Вход · TenderFlow{% endblock %}
+{% block content %}<section class="auth-page"><form method="post" class="panel auth-card">{% csrf_token %}<span class="overline purple">С возвращением</span><h1>Войти в кабинет</h1><p>Управляйте закупками и предложениями.</p>{% include "procurement/form_fields.html" %}<button class="btn wide">Войти</button><div class="auth-foot"><a href="{% url 'password_reset' %}">Забыли пароль?</a><br>Нет аккаунта? <a href="{% url 'register' %}">Зарегистрироваться</a></div></form></section>{% endblock %}
