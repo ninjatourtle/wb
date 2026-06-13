@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
-    AuditEvent, Bid, Membership, Notification, Organization, Profile, Question,
-    SupplierApplication, Tender, TenderDocument, TenderLot,
+    AuditEvent, Bid, BidLot, Contract, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
+    SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderLot,
 )
 
 
@@ -32,6 +32,11 @@ admin.site.register(TenderLot)
 admin.site.register(TenderDocument)
 admin.site.register(Question)
 admin.site.register(Notification)
+admin.site.register(Contract)
+admin.site.register(SupplierDocument)
+admin.site.register(TenderApproval)
+admin.site.register(ProcurementProtocol)
+admin.site.register(BidLot)
 
 
 @admin.register(AuditEvent)

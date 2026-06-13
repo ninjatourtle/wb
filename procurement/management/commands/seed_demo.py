@@ -19,13 +19,13 @@ class Command(BaseCommand):
         customer.save()
         customer_org, _ = Organization.objects.update_or_create(
             inn="7701234567",
-            defaults={"name": "ООО «Северная компания»", "kind": Organization.Kind.CUSTOMER, "contact_email": "customer@example.ru"},
+            defaults={"name": "ООО «Вайлдберриз»", "kind": Organization.Kind.CUSTOMER, "contact_email": "procurement@wildberries.ru"},
         )
         Profile.objects.update_or_create(
             user=customer,
             defaults={"company_name": customer_org.name, "inn": customer_org.inn, "role": Profile.Role.CUSTOMER, "organization": customer_org},
         )
-        Membership.objects.update_or_create(user=customer, organization=customer_org)
+        Membership.objects.update_or_create(user=customer, organization=customer_org, defaults={"role": Membership.Role.OWNER})
         suppliers = []
         for idx, (username, company) in enumerate([("supplier", "ООО «ТехПоставка»"), ("partner", "АО «ПромРесурс»")]):
             user, _ = User.objects.get_or_create(username=username)
@@ -36,7 +36,11 @@ class Command(BaseCommand):
             )
             Profile.objects.update_or_create(user=user, defaults={"company_name": company, "inn": org.inn, "role": Profile.Role.SUPPLIER, "organization": org})
             Membership.objects.update_or_create(user=user, organization=org)
-            SupplierApplication.objects.update_or_create(organization=org, defaults={"status": SupplierApplication.Status.APPROVED, "reviewed_by": customer, "reviewed_at": timezone.now()})
+            SupplierApplication.objects.update_or_create(
+                organization=org,
+                customer=customer_org,
+                defaults={"status": SupplierApplication.Status.APPROVED, "reviewed_by": customer, "reviewed_at": timezone.now()},
+            )
             suppliers.append(user)
 
         examples = [

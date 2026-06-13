@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block title %}{{ protocol.number }} · WB Tender{% endblock %}{% block content %}
+<section class="page-hero compact"><div class="container"><span>Прозрачный результат закупки</span><h1>{{ protocol.get_kind_display }}</h1><p>{{ protocol.number }}</p></div></section>
+<section class="section container narrow"><div class="panel"><span class="eyebrow">Официальный документ</span><h2>{{ protocol.tender.title }}</h2><p>Создан: {{ protocol.created_at|date:"d.m.Y H:i" }}</p><p>Ответственный: {{ protocol.created_by.get_full_name|default:protocol.created_by.username }}</p><pre>{{ protocol.data }}</pre><a class="text-link" href="{{ protocol.tender.get_absolute_url }}">Вернуться к закупке →</a></div></section>{% endblock %}

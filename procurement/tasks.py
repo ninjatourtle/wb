@@ -5,7 +5,8 @@ except ModuleNotFoundError:
         return func
 from django.utils import timezone
 
-from .models import Notification, Tender
+from .models import Tender
+from .services import notify_user
 
 
 @shared_task
@@ -15,10 +16,6 @@ def close_expired_tenders():
     for tender in tenders:
         tender.status = Tender.Status.REVIEW
         tender.save(update_fields=["status"])
-        Notification.objects.create(
-            user=tender.owner,
-            title=f"Прием заявок завершен: {tender.number}",
-            url=tender.get_absolute_url(),
-        )
+        notify_user(tender.owner, f"Прием заявок завершен: {tender.number}", url=tender.get_absolute_url())
         count += 1
     return count
