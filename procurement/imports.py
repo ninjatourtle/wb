@@ -2,19 +2,23 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from html import unescape
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.utils.html import strip_tags
 
-from .models import AuditEvent, ImportedTender, Tender, TenderImportSource
+from .models import AuditEvent, ImportedTender, Tender, TenderImportSource, TenderLot
 
 
 logger = logging.getLogger(__name__)
+BIDZAAR_DETAIL_VERSION = 2
 
 DEFAULT_FIELDS = {
     "external_id": "id",
@@ -103,6 +107,14 @@ def fetch_json(url, headers=None):
         raise TenderImportError(f"Не удалось получить данные: {exc}") from exc
 
 
+def fetch_optional_json(url, default):
+    try:
+        return fetch_json(url)
+    except TenderImportError:
+        logger.warning("Optional Bidzaar endpoint is unavailable: %s", url)
+        return default
+
+
 def bidzaar_category(title):
     value = title.lower()
     if any(word in value for word in ("монтаж", "ремонт", "строитель", "устройств", "работ")):
@@ -117,7 +129,19 @@ def bidzaar_category(title):
 def bidzaar_address(addresses):
     values = []
     for address in addresses or []:
-        value = address.get("comment") or address.get("search")
+        structured = ", ".join(
+            filter(
+                None,
+                (
+                    address.get("country"),
+                    address.get("region"),
+                    address.get("area"),
+                    address.get("city"),
+                    address.get("building"),
+                ),
+            )
+        )
+        value = address.get("comment") or structured or address.get("search")
         if value:
             values.append(value)
     return "; ".join(values) or "Не указан"
@@ -134,7 +158,7 @@ def transform_bidzaar_item(item, origin):
     }.get(item.get("status"), Tender.Status.PUBLISHED)
     deadline = item.get("acceptanceEndDate") or item.get("finishDate") or item.get("publishDate")
     published = item.get("publishDate") or "не указана"
-    return {
+    result = {
         "id": external_id,
         "number": item.get("number") or external_id,
         "title": title,
@@ -152,6 +176,166 @@ def transform_bidzaar_item(item, origin):
         "url": f"{origin}/app/process/light/{external_id}",
         "bidzaar": item,
     }
+    result["_listing_hash"] = payload_hash(result)
+    return result
+
+
+def plain_text(value):
+    html = re.sub(r"</(?:p|div|li|h[1-6])\s*>", "\n", str(value or ""), flags=re.I)
+    return unescape(strip_tags(html)).strip()
+
+
+def bidzaar_detail_urls(origin, external_id, version_id=None, request_id=None):
+    base = f"{origin}/api/process/light/procedures"
+    urls = {"main": f"{base}/read/{external_id}/main-view"}
+    if version_id:
+        version_base = f"{base}/read/{external_id}/versions/{version_id}"
+        urls.update({
+            "positions": f"{version_base}/positions",
+            "groups": f"{version_base}/groups",
+        })
+    if request_id:
+        urls["questionnaire"] = f"{origin}/api/questionnairenew/requests/{request_id}"
+    return urls
+
+
+def fetch_bidzaar_details(item):
+    origin = item["url"].split("/app/process/light/", 1)[0]
+    main = fetch_json(bidzaar_detail_urls(origin, item["id"])["main"])
+    version = main.get("versionInformation") or {}
+    urls = bidzaar_detail_urls(origin, item["id"], version.get("id"), version.get("requestId"))
+    positions = fetch_optional_json(urls["positions"], []) if urls.get("positions") else []
+    groups = fetch_optional_json(urls["groups"], []) if urls.get("groups") else []
+    questionnaire = (
+        fetch_optional_json(urls["questionnaire"], {"groups": []})
+        if urls.get("questionnaire")
+        else {"groups": []}
+    )
+    general = main.get("generalInformation") or {}
+    parameters = main.get("parameters") or {}
+    criteria = [
+        {
+            "id": criterion.get("id"),
+            "group": group.get("name") or "Неценовые критерии",
+            "title": criterion.get("text") or "Критерий",
+            "comment": criterion.get("comment") or "",
+            "type": criterion.get("type") or "",
+            "required": bool(criterion.get("required")),
+            "options": [
+                option.get("value")
+                for option in (criterion.get("dataSource") or {}).get("items", [])
+                if option.get("value")
+            ],
+        }
+        for group in questionnaire.get("groups", [])
+        for criterion in group.get("items", [])
+    ]
+    documents = [
+        {
+            "id": document.get("id"),
+            "title": document.get("name") or document.get("originalName") or "Документ",
+            "extension": document.get("extension") or "",
+            "size": document.get("length") or 0,
+            "url": f"{origin}/api/filestorage/files/download/{document.get('fileId')}",
+        }
+        for document in general.get("files", [])
+        if document.get("fileId")
+    ]
+    rules = [
+        {"label": "Вид запроса", "value": "Открытый" if parameters.get("openType") == 0 else "Закрытый"},
+        {"label": "Валюта запроса", "value": parameters.get("currency") or "RUB"},
+        {
+            "label": "После подачи предложения участники видят",
+            "value": "Только свое предложение"
+            if parameters.get("otherParticipantsVisibility") == 0
+            else "Предложения других участников",
+        },
+        {
+            "label": "Альтернативных предложений",
+            "value": str(parameters.get("maxAlternativeProposalCount") or 0),
+        },
+        {
+            "label": "Напоминание о завершении приема",
+            "value": f"за {parameters.get('acceptanceEndNotificationHours')} ч"
+            if parameters.get("acceptanceEndNotificationHours")
+            else "Не задано",
+        },
+        {
+            "label": "Ориентировочный срок подведения итогов",
+            "value": f"{parameters.get('approximateDeadlineForSummingUp')} календ. дн."
+            if parameters.get("approximateDeadlineForSummingUp")
+            else "Не задано",
+        },
+    ]
+    if groups:
+        rules.extend([
+            {
+                "label": "Изменение цены",
+                "value": "Можно повышать и понижать"
+                if any(group.get("params", {}).get("permitUpDown") for group in groups)
+                else "Только понижение",
+            },
+            {
+                "label": "Минимальный шаг изменения цены",
+                "value": f"{groups[0].get('params', {}).get('reductionStep') or 0} %",
+            },
+        ])
+    return {
+        "schema_version": BIDZAAR_DETAIL_VERSION,
+        "main": main,
+        "positions": positions,
+        "groups": groups,
+        "criteria": criteria,
+        "documents": documents,
+        "parameters": parameters,
+        "rules": rules,
+    }
+
+
+def enrich_bidzaar_item(item, existing=None):
+    existing = existing or {}
+    if (
+        existing.get("_listing_hash") == item.get("_listing_hash")
+        and existing.get("details", {}).get("schema_version") == BIDZAAR_DETAIL_VERSION
+    ):
+        item.update({
+            "description": existing.get("description", item["description"]),
+            "requirements": existing.get("requirements", item["requirements"]),
+            "delivery_address": existing.get("delivery_address", item["delivery_address"]),
+            "budget": existing.get("budget", item["budget"]),
+            "procedure": existing.get("procedure", item["procedure"]),
+            "details": existing["details"],
+        })
+        return item
+    if item.get("status") == Tender.Status.COMPLETED and not existing.get("details"):
+        return item
+
+    details = fetch_bidzaar_details(item)
+    general = details["main"].get("generalInformation") or {}
+    parameters = details["parameters"]
+    description = plain_text(general.get("description"))
+    criteria_text = "\n\n".join(
+        filter(
+            None,
+            (
+                f"{criterion['title']}\n{criterion['comment']}".strip()
+                for criterion in details["criteria"]
+            ),
+        )
+    )
+    item.update({
+        "description": description or item["description"],
+        "requirements": criteria_text or item["requirements"],
+        "delivery_address": bidzaar_address(general.get("deliveryAddresses")) or item["delivery_address"],
+        "budget": str(sum(Decimal(str(group.get("params", {}).get("expectedPrice") or 0)) for group in details["groups"])),
+        "procedure": Tender.Procedure.AUCTION if any(
+            group.get("params", {}).get("permitUpDown") for group in details["groups"]
+        ) else Tender.Procedure.CLOSED,
+        "details": details,
+    })
+    if parameters.get("acceptanceEndDate"):
+        item["deadline"] = parameters["acceptanceEndDate"]
+    return item
 
 
 def fetch_bidzaar_items(source):
@@ -275,6 +459,10 @@ def sync_item(source, item):
     record = ImportedTender.objects.select_related("tender").filter(
         source=source, external_id=external_id
     ).first()
+    if source.adapter == TenderImportSource.Adapter.BIDZAAR:
+        item = enrich_bidzaar_item(item, record.raw_data if record else None)
+        normalized = normalize_item(source, item)
+        defaults = normalized["tender"]
 
     created = False
     if record:
@@ -313,6 +501,9 @@ def sync_item(source, item):
         record.last_changed_at = now
     record.save()
 
+    if source.adapter == TenderImportSource.Adapter.BIDZAAR and item.get("details"):
+        sync_bidzaar_lots(tender, item["details"])
+
     if created or changed_fields:
         AuditEvent.objects.create(
             user=source.owner,
@@ -323,6 +514,32 @@ def sync_item(source, item):
             details={"source": source.name, "external_id": external_id, "fields": changed_fields},
         )
     return "created" if created else "updated" if changed else "unchanged"
+
+
+def sync_bidzaar_lots(tender, details):
+    positions = details.get("positions", [])
+    seen = []
+    for index, position in enumerate(positions, start=1):
+        external_id = str(position.get("id") or "")
+        if not external_id:
+            continue
+        seen.append(external_id)
+        TenderLot.objects.update_or_create(
+            tender=tender,
+            external_id=external_id,
+            defaults={
+                "title": position.get("name") or f"Позиция {index}",
+                "description": position.get("description") or "",
+                "quantity": normalize_decimal(position.get("count") or 1, "quantity"),
+                "unit": position.get("unit") or "шт.",
+                "budget": normalize_decimal(
+                    position.get("startPrice") or position.get("price") or 0, "budget"
+                ),
+            },
+        )
+    TenderLot.objects.filter(tender=tender).exclude(external_id="").exclude(
+        external_id__in=seen
+    ).delete()
 
 
 def sync_source(source):

@@ -18,6 +18,10 @@ class TenderAdmin(admin.ModelAdmin):
     list_display = ("number", "title", "owner", "budget", "deadline", "status")
     list_filter = ("status", "category")
     search_fields = ("number", "title", "owner__profile__company_name")
+    list_per_page = 50
+    list_max_show_all = 200
+    show_full_result_count = False
+    ordering = ("-created_at",)
 
 
 @admin.register(Bid)
@@ -53,6 +57,9 @@ class ImportedTenderAdmin(admin.ModelAdmin):
     list_filter = ("source",)
     search_fields = ("external_id", "tender__number", "tender__title")
     readonly_fields = ("payload_hash", "raw_data", "first_seen_at", "last_seen_at", "last_changed_at")
+    list_per_page = 50
+    list_max_show_all = 200
+    show_full_result_count = False
 
 
 @admin.register(AuditEvent)

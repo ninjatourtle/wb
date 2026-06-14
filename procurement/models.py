@@ -228,11 +228,21 @@ class ImportedTender(models.Model):
 
 class TenderLot(models.Model):
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="lots")
+    external_id = models.CharField("ID во внешней системе", max_length=200, blank=True)
     title = models.CharField("Название лота", max_length=250)
     description = models.TextField("Описание", blank=True)
     quantity = models.DecimalField("Количество", max_digits=12, decimal_places=2, default=1)
     unit = models.CharField("Единица измерения", max_length=30, default="шт.")
     budget = models.DecimalField("Начальная цена", max_digits=14, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tender", "external_id"],
+                condition=~models.Q(external_id=""),
+                name="unique_external_lot_per_tender",
+            )
+        ]
 
     def __str__(self):
         return self.title

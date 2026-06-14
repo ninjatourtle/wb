@@ -1,1 +1,7 @@
-<a class="tender-card opportunity" href="{{ tender.get_absolute_url }}"><div class="card-top"><span class="live-dot">{{ tender.get_procedure_display }}</span><span class="number">{{ tender.number }}</span></div><h3>{{ tender.title }}</h3><p>{{ tender.description|truncatewords:18 }}</p><div class="price"><small>Потенциал контракта</small><strong>{{ tender.budget|floatformat:0 }} ₽</strong></div><div class="card-signals"><span>Wildberries</span><span>{{ tender.bid_count|default:tender.bids.count }} участников</span></div><div class="card-bottom"><span>{{ tender.get_category_display }}</span><b>Успеть до {{ tender.deadline|date:"d.m.Y" }} →</b></div></a>
+<a class="tender-card opportunity" href="{{ tender.get_absolute_url }}">
+  <div class="card-top"><span class="live-dot">{{ tender.get_status_display }}</span><span class="number">{{ tender.number }}</span></div>
+  <h3>{{ tender.title }}</h3>
+  <p>{{ tender.description|truncatewords:24 }}</p>
+  <div class="card-meta"><span><small>Формат</small>{{ tender.get_procedure_display }}</span><span><small>Место поставки</small>{{ tender.delivery_address|truncatechars:34 }}</span></div>
+  <div class="card-bottom"><span>{{ tender.get_category_display }}</span><b>До {{ tender.deadline|date:"d.m.Y H:i" }} →</b></div>
+</a>

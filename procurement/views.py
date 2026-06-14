@@ -146,7 +146,10 @@ def tender_list(request):
 
 
 def tender_detail(request, pk):
-    tender = get_object_or_404(Tender.objects.select_related("owner__profile", "organization"), pk=pk)
+    tender = get_object_or_404(
+        Tender.objects.select_related("owner__profile", "organization", "import_record__source"),
+        pk=pk,
+    )
     profile = getattr(request.user, "profile", None) if request.user.is_authenticated else None
     can_manage = tender.user_can_manage(request.user)
     can_review = tender.user_can_review(request.user)
@@ -155,12 +158,19 @@ def tender_detail(request, pk):
     own_bid = Bid.objects.filter(tender=tender, supplier=request.user).first() if profile and profile.role == Profile.Role.SUPPLIER else None
     can_see_bids = can_review and not tender.is_open
     best_price = tender.best_price if tender.procedure == Tender.Procedure.AUCTION else None
+    imported_data = tender.import_record.raw_data if hasattr(tender, "import_record") else {}
+    details = imported_data.get("details", {})
     return render(request, "procurement/tender_detail.html", {
         "tender": tender, "own_bid": own_bid,
         "bids": tender.bids.select_related("supplier__profile") if can_see_bids else [],
         "is_owner": can_manage, "can_review": can_review, "can_see_bids": can_see_bids, "best_price": best_price,
         "question_form": QuestionForm(), "document_form": TenderDocumentForm(), "lot_form": TenderLotForm(),
         "is_favorite": request.user.is_authenticated and tender.favorites.filter(pk=request.user.pk).exists(),
+        "is_imported": bool(imported_data),
+        "external_documents": details.get("documents", []),
+        "external_criteria": details.get("criteria", []),
+        "external_parameters": details.get("parameters", {}),
+        "external_rules": details.get("rules", []),
     })
 
 
