@@ -51,6 +51,26 @@ class ProcurementFlowTests(TestCase):
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
 
+    def test_supplier_can_submit_bid_for_imported_tender_without_budget(self):
+        self.tender.budget = 0
+        self.tender.save(update_fields=["budget"])
+        source = TenderImportSource.objects.create(
+            name="Imported",
+            url="https://example.com/tenders",
+            organization=self.customer.profile.organization,
+            owner=self.customer,
+        )
+        ImportedTender.objects.create(source=source, external_id="external-1", tender=self.tender)
+        self.client.login(username="supplier", password="testpass123")
+
+        response = self.client.post(
+            reverse("bid_submit", args=[self.tender.pk]),
+            {"price": 90000, "delivery_days": 10, "warranty_months": 12, "comment": "Готовы"},
+        )
+
+        self.assertRedirects(response, self.tender.get_absolute_url())
+        self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
+
     def test_supplier_cannot_create_tender(self):
         self.client.login(username="supplier", password="testpass123")
         response = self.client.get(reverse("tender_create"))

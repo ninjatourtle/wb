@@ -160,6 +160,16 @@ def tender_detail(request, pk):
     best_price = tender.best_price if tender.procedure == Tender.Procedure.AUCTION else None
     imported_data = tender.import_record.raw_data if hasattr(tender, "import_record") else {}
     details = imported_data.get("details", {})
+    position_groups = details.get("groups", [])
+    position_specification = None
+    if imported_data and not tender.lots.exists():
+        group_params = position_groups[0].get("params", {}) if position_groups else {}
+        position_specification = {
+            "description": "Участники указывают цену предложения без детализации по позициям.",
+            "permit_up_down": group_params.get("permitUpDown"),
+            "step": group_params.get("reductionStep"),
+            "expected_price": group_params.get("expectedPrice"),
+        }
     return render(request, "procurement/tender_detail.html", {
         "tender": tender, "own_bid": own_bid,
         "bids": tender.bids.select_related("supplier__profile") if can_see_bids else [],
@@ -171,6 +181,7 @@ def tender_detail(request, pk):
         "external_criteria": details.get("criteria", []),
         "external_parameters": details.get("parameters", {}),
         "external_rules": details.get("rules", []),
+        "position_specification": position_specification,
     })
 
 
@@ -307,7 +318,7 @@ def bid_submit(request, pk):
         required_price = current_best_price - tender.auction_step if current_best_price and tender.auction_step else current_best_price
         if form.errors:
             pass
-        elif new_bid.price > tender.budget:
+        elif tender.budget and new_bid.price > tender.budget:
             form.add_error("price", "Предложение не может превышать начальную цену.")
         elif tender.procedure == Tender.Procedure.AUCTION and required_price is not None and new_bid.price > required_price:
             form.add_error("price", f"Ставка должна быть не выше {required_price} ₽ с учетом шага аукциона.")

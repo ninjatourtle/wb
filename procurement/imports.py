@@ -517,7 +517,11 @@ def sync_item(source, item):
 
 
 def sync_bidzaar_lots(tender, details):
-    positions = details.get("positions", [])
+    positions = [
+        position
+        for position in details.get("positions", [])
+        if not position.get("isFake") and (position.get("name") or "").strip()
+    ]
     seen = []
     for index, position in enumerate(positions, start=1):
         external_id = str(position.get("id") or "")
