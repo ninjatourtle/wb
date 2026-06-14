@@ -154,6 +154,71 @@ class Tender(models.Model):
         ).exists()
 
 
+class TenderImportSource(models.Model):
+    name = models.CharField("Название источника", max_length=120, unique=True)
+    url = models.URLField("URL JSON API", max_length=500)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="tender_import_sources"
+    )
+    owner = models.ForeignKey(User, on_delete=models.PROTECT, related_name="tender_import_sources")
+    is_active = models.BooleanField("Активен", default=True)
+    items_path = models.CharField(
+        "Путь к списку", max_length=120, blank=True, help_text="Например: result.items"
+    )
+    auth_header = models.CharField(
+        "Заголовок авторизации", max_length=80, blank=True, help_text="Например: Authorization"
+    )
+    auth_env_var = models.CharField(
+        "Переменная окружения с токеном", max_length=120, blank=True
+    )
+    field_mapping = models.JSONField(
+        "Соответствие полей",
+        default=dict,
+        blank=True,
+        help_text='Например: {"external_id": "id", "title": "name", "deadline": "end_at"}',
+    )
+    status_mapping = models.JSONField(
+        "Соответствие статусов", default=dict, blank=True
+    )
+    cancel_missing = models.BooleanField(
+        "Отменять пропавшие тендеры",
+        default=False,
+        help_text="Включайте только если API всегда возвращает полный список актуальных тендеров.",
+    )
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
+class ImportedTender(models.Model):
+    source = models.ForeignKey(
+        TenderImportSource, on_delete=models.CASCADE, related_name="imported_tenders"
+    )
+    external_id = models.CharField("ID во внешней системе", max_length=200)
+    tender = models.OneToOneField(
+        Tender, on_delete=models.CASCADE, related_name="import_record"
+    )
+    external_url = models.URLField("Ссылка на источник", max_length=500, blank=True)
+    payload_hash = models.CharField(max_length=64, blank=True)
+    raw_data = models.JSONField(default=dict, blank=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    last_changed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_id"], name="unique_external_tender_per_source"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.source}: {self.external_id}"
+
+
 class TenderLot(models.Model):
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="lots")
     title = models.CharField("Название лота", max_length=250)

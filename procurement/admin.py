@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     AuditEvent, Bid, BidLot, Contract, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
-    SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderLot,
+    ImportedTender, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
+    TenderImportSource, TenderLot,
 )
 
 
@@ -37,6 +38,21 @@ admin.site.register(SupplierDocument)
 admin.site.register(TenderApproval)
 admin.site.register(ProcurementProtocol)
 admin.site.register(BidLot)
+
+
+@admin.register(TenderImportSource)
+class TenderImportSourceAdmin(admin.ModelAdmin):
+    list_display = ("name", "organization", "is_active", "last_synced_at", "last_error")
+    list_filter = ("is_active", "organization")
+    search_fields = ("name", "url")
+
+
+@admin.register(ImportedTender)
+class ImportedTenderAdmin(admin.ModelAdmin):
+    list_display = ("external_id", "source", "tender", "last_seen_at", "last_changed_at")
+    list_filter = ("source",)
+    search_fields = ("external_id", "tender__number", "tender__title")
+    readonly_fields = ("payload_hash", "raw_data", "first_seen_at", "last_seen_at", "last_changed_at")
 
 
 @admin.register(AuditEvent)

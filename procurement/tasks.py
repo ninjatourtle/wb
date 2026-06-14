@@ -6,6 +6,7 @@ except ModuleNotFoundError:
 from django.utils import timezone
 
 from .models import Tender
+from .imports import sync_active_sources
 from .services import notify_user
 
 
@@ -19,3 +20,8 @@ def close_expired_tenders():
         notify_user(tender.owner, f"Прием заявок завершен: {tender.number}", url=tender.get_absolute_url())
         count += 1
     return count
+
+
+@shared_task
+def sync_external_tenders():
+    return sync_active_sources()

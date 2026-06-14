@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -7,9 +8,11 @@ from django.utils import timezone
 
 from .models import (
     Bid, Contract, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
-    SupplierDocument, Tender, TenderApproval, TenderDocument, TenderLot,
+    ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportSource,
+    TenderLot,
 )
 from .forms import TenderDocumentForm
+from .imports import sync_source
 
 
 class ProcurementFlowTests(TestCase):
@@ -217,6 +220,7 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(reverse("health"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
 
     def test_reviewer_cannot_create_tender(self):
         reviewer = User.objects.create_user("reviewer", password="testpass123")
@@ -521,3 +525,103 @@ class ProcurementFlowTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.customer.profile.organization.refresh_from_db()
         self.assertEqual(self.customer.profile.organization.name, "Заказчик")
+
+
+class TenderImportTests(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user("import-owner", password="testpass123")
+        self.organization = Organization.objects.create(
+            name="Импортируемый заказчик", kind=Organization.Kind.CUSTOMER
+        )
+        self.source = TenderImportSource.objects.create(
+            name="Тестовый API",
+            url="https://example.test/tenders",
+            organization=self.organization,
+            owner=self.owner,
+        )
+        self.item = {
+            "id": "external-42",
+            "number": "EXT-42",
+            "title": "Поставка из внешнего API",
+            "category": "goods",
+            "description": "Начальное описание",
+            "delivery_address": "Москва",
+            "budget": "150000.50",
+            "deadline": (timezone.now() + timedelta(days=3)).isoformat(),
+            "procedure": "auction",
+            "auction_step": "5000",
+            "status": "active",
+            "url": "https://example.test/tenders/42",
+        }
+
+    @patch("procurement.imports.fetch_source_items")
+    def test_sync_creates_then_updates_without_duplicate(self, fetch_source_items):
+        fetch_source_items.return_value = [self.item]
+        first = sync_source(self.source)
+        self.assertEqual(first["created"], 1)
+        self.assertEqual(Tender.objects.filter(number="EXT-42").count(), 1)
+
+        changed = {**self.item, "title": "Обновленное название", "status": "closed"}
+        fetch_source_items.return_value = [changed]
+        second = sync_source(self.source)
+
+        self.assertEqual(second["updated"], 1)
+        self.assertEqual(Tender.objects.filter(number="EXT-42").count(), 1)
+        tender = Tender.objects.get(number="EXT-42")
+        self.assertEqual(tender.title, "Обновленное название")
+        self.assertEqual(tender.status, Tender.Status.COMPLETED)
+        self.assertEqual(tender.import_record.external_id, "external-42")
+
+    @patch("procurement.imports.fetch_source_items")
+    def test_unchanged_payload_is_idempotent(self, fetch_source_items):
+        fetch_source_items.return_value = [self.item]
+        sync_source(self.source)
+        result = sync_source(self.source)
+
+        self.assertEqual(result["unchanged"], 1)
+        self.assertEqual(ImportedTender.objects.count(), 1)
+
+    @patch("procurement.imports.fetch_source_items")
+    def test_missing_tender_is_cancelled_only_when_enabled(self, fetch_source_items):
+        fetch_source_items.return_value = [self.item]
+        sync_source(self.source)
+        fetch_source_items.return_value = []
+
+        result = sync_source(self.source)
+        self.assertEqual(result["cancelled"], 0)
+        self.assertEqual(Tender.objects.get(number="EXT-42").status, Tender.Status.PUBLISHED)
+
+        self.source.cancel_missing = True
+        self.source.save(update_fields=["cancel_missing"])
+        fetch_source_items.return_value = [{
+            "id": "other",
+            "number": "OTHER",
+            "title": "Другой",
+            "budget": "1",
+            "deadline": self.item["deadline"],
+        }]
+        result = sync_source(self.source)
+        self.assertEqual(result["cancelled"], 1)
+        self.assertEqual(Tender.objects.get(number="EXT-42").status, Tender.Status.CANCELLED)
+
+    @patch("procurement.imports.fetch_source_items")
+    def test_custom_field_mapping(self, fetch_source_items):
+        self.source.field_mapping = {
+            "external_id": "uid",
+            "number": "code",
+            "title": "name",
+            "deadline": "dates.finish",
+        }
+        self.source.save(update_fields=["field_mapping"])
+        fetch_source_items.return_value = [{
+            "uid": "mapped-1",
+            "code": "MAP-1",
+            "name": "Тендер с нестандартными полями",
+            "dates": {"finish": self.item["deadline"]},
+            "budget": 500,
+        }]
+
+        result = sync_source(self.source)
+
+        self.assertEqual(result["created"], 1)
+        self.assertTrue(Tender.objects.filter(number="MAP-1").exists())

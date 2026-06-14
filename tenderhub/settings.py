@@ -120,7 +120,11 @@ CELERY_BEAT_SCHEDULE = {
     "close-expired-tenders": {
         "task": "procurement.tasks.close_expired_tenders",
         "schedule": 60.0,
-    }
+    },
+    "sync-external-tenders-hourly": {
+        "task": "procurement.tasks.sync_external_tenders",
+        "schedule": 3600.0,
+    },
 }
 
 DATABASES["default"]["CONN_MAX_AGE"] = int(os.getenv("DB_CONN_MAX_AGE", "60"))
