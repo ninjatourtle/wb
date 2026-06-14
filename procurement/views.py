@@ -123,25 +123,42 @@ def register(request):
 
 
 def tender_list(request):
-    tenders = Tender.objects.filter(status=Tender.Status.PUBLISHED).select_related("owner__profile", "organization")
+    tenders = Tender.objects.filter(
+        status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
+    ).select_related("owner__profile", "organization")
     query, category = request.GET.get("q", "").strip(), request.GET.get("category", "")
     procedure, price_to = request.GET.get("procedure", ""), request.GET.get("price_to", "")
+    source = request.GET.get("source", "")
+    if category not in Tender.Category.values:
+        category = ""
+    if procedure not in Tender.Procedure.values:
+        procedure = ""
+    if source not in {"", "local", "imported"}:
+        source = ""
     if query:
         tenders = tenders.filter(Q(title__icontains=query) | Q(number__icontains=query) | Q(description__icontains=query))
     if category:
         tenders = tenders.filter(category=category)
     if procedure:
         tenders = tenders.filter(procedure=procedure)
+    if source == "imported":
+        tenders = tenders.filter(import_record__isnull=False)
+    elif source == "local":
+        tenders = tenders.filter(import_record__isnull=True)
     if price_to:
         try:
             tenders = tenders.filter(budget__lte=price_to)
         except ValueError:
             pass
-    page = Paginator(tenders.annotate(bid_count=Count("bids")), 12).get_page(request.GET.get("page"))
+    tenders = tenders.annotate(bid_count=Count("bids")).order_by("deadline", "-created_at")
+    page = Paginator(tenders, 12).get_page(request.GET.get("page"))
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
     return render(request, "procurement/tender_list.html", {
         "tenders": page, "page_obj": page, "query": query, "category": category,
-        "procedure": procedure, "price_to": price_to, "categories": Tender.Category.choices,
-        "procedures": Tender.Procedure.choices,
+        "procedure": procedure, "price_to": price_to, "source": source,
+        "categories": Tender.Category.choices, "procedures": Tender.Procedure.choices,
+        "pagination_query": pagination_params.urlencode(),
     })
 
 
@@ -198,6 +215,14 @@ def dashboard(request):
         category = request.GET.get("category", "")
         procedure = request.GET.get("procedure", "")
         source = request.GET.get("source", "")
+        if status not in Tender.Status.values:
+            status = ""
+        if category not in Tender.Category.values:
+            category = ""
+        if procedure not in Tender.Procedure.values:
+            procedure = ""
+        if source not in {"", "local", "imported"}:
+            source = ""
         tenders = organization_tenders
         if query:
             tenders = tenders.filter(Q(title__icontains=query) | Q(number__icontains=query))
@@ -231,17 +256,46 @@ def dashboard(request):
         return render(request, "procurement/dashboard_customer.html", {
             "tenders": page, "page_obj": page, "pending_applications": pending, "notifications": notifications,
             "total_tenders": organization_tenders.count(),
-            "total_budget": organization_tenders.aggregate(v=Sum("budget"))["v"] or 0,
+            "total_budget": organization_tenders.filter(
+                status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
+            ).aggregate(v=Sum("budget"))["v"] or 0,
+            "active_tenders": organization_tenders.filter(
+                status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
+            ).count(),
+            "review_tenders": organization_tenders.filter(status=Tender.Status.REVIEW).count(),
             "pending_approvals": approvals, "query": query, "status": status, "category": category,
             "procedure": procedure, "source": source, "statuses": Tender.Status.choices,
             "categories": Tender.Category.choices, "procedures": Tender.Procedure.choices,
             "pagination_query": pagination_params.urlencode(),
         })
-    bids = request.user.bids.select_related("tender", "tender__owner__profile")
+    bid_query = request.GET.get("q", "").strip()
+    bid_status = request.GET.get("status", "")
+    tender_status = request.GET.get("tender_status", "")
+    if bid_status not in Bid.Status.values:
+        bid_status = ""
+    if tender_status not in Tender.Status.values:
+        tender_status = ""
+    all_bids = request.user.bids.select_related("tender", "tender__owner__profile")
+    bids = all_bids
+    if bid_query:
+        bids = bids.filter(Q(tender__title__icontains=bid_query) | Q(tender__number__icontains=bid_query))
+    if bid_status:
+        bids = bids.filter(status=bid_status)
+    if tender_status:
+        bids = bids.filter(tender__status=tender_status)
+    bids = bids.order_by("-updated_at", "-pk")
+    page = Paginator(bids, 20).get_page(request.GET.get("page"))
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
     application = profile.organization.supplier_applications.order_by("submitted_at").first() if profile.organization else None
     return render(request, "procurement/dashboard_supplier.html", {
-        "bids": bids, "application": application, "notifications": notifications,
-        "favorites": request.user.favorite_tenders.all()[:4],
+        "bids": page, "page_obj": page, "application": application, "notifications": notifications,
+        "favorites": request.user.favorite_tenders.all()[:4], "total_bids": all_bids.count(),
+        "winning_bids": all_bids.filter(status=Bid.Status.WINNER).count(),
+        "active_bids": all_bids.filter(tender__status=Tender.Status.PUBLISHED, tender__deadline__gt=timezone.now()).count(),
+        "query": bid_query, "status": bid_status, "tender_status": tender_status,
+        "bid_statuses": Bid.Status.choices, "tender_statuses": Tender.Status.choices,
+        "pagination_query": pagination_params.urlencode(),
     })
 
 

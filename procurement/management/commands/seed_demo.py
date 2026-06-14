@@ -16,6 +16,14 @@ class Command(BaseCommand):
     help = "Создает демонстрационных пользователей и тендеры"
 
     def handle(self, *args, **options):
+        admin_user, _ = User.objects.get_or_create(
+            username="admin",
+            defaults={"email": "admin@example.ru"},
+        )
+        admin_user.is_staff = True
+        admin_user.is_superuser = True
+        admin_user.set_password("demo12345")
+        admin_user.save()
         customer, _ = User.objects.get_or_create(username="customer", defaults={"email": "customer@example.ru"})
         customer.set_password("demo12345")
         customer.save()

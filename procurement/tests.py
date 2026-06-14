@@ -443,6 +443,34 @@ class ProcurementFlowTests(TestCase):
         self.assertEqual(len(response.context["tenders"]), 25)
         self.assertContains(response, "Далее")
 
+    def test_supplier_dashboard_filters_and_paginates_bids(self):
+        Bid.objects.create(
+            tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10
+        )
+        for index in range(20):
+            tender = Tender.objects.create(
+                owner=self.customer, organization=self.customer.profile.organization,
+                title=f"Услуги {index}", number=f"S-{index}", category=Tender.Category.SERVICES,
+                description="Описание", delivery_address="Москва", budget=50000,
+                deadline=timezone.now() + timedelta(days=5), status=Tender.Status.PUBLISHED,
+            )
+            Bid.objects.create(tender=tender, supplier=self.supplier, price=40000, delivery_days=5)
+        self.client.login(username="supplier", password="testpass123")
+        response = self.client.get(reverse("dashboard"), {"q": "Услуги"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 20)
+        self.assertEqual(len(response.context["bids"]), 20)
+        self.assertNotContains(response, "Поставка оборудования")
+
+    def test_tender_list_ignores_invalid_choice_filters(self):
+        response = self.client.get(
+            reverse("tender_list"),
+            {"category": "invalid", "procedure": "invalid", "source": "invalid"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["category"], "")
+        self.assertEqual(response.context["procedure"], "")
+        self.assertEqual(response.context["source"], "")
+
     def test_unapproved_supplier_cannot_ask_question(self):
         application = self.supplier.profile.organization.supplier_applications.get(
             customer=self.customer.profile.organization
