@@ -42,8 +42,8 @@ admin.site.register(BidLot)
 
 @admin.register(TenderImportSource)
 class TenderImportSourceAdmin(admin.ModelAdmin):
-    list_display = ("name", "organization", "is_active", "last_synced_at", "last_error")
-    list_filter = ("is_active", "organization")
+    list_display = ("name", "adapter", "organization", "is_active", "last_synced_at", "last_error")
+    list_filter = ("adapter", "is_active", "organization")
     search_fields = ("name", "url")
 
 

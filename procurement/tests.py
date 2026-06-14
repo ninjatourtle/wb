@@ -12,7 +12,7 @@ from .models import (
     TenderLot,
 )
 from .forms import TenderDocumentForm
-from .imports import sync_source
+from .imports import fetch_bidzaar_items, sync_source
 
 
 class ProcurementFlowTests(TestCase):
@@ -625,3 +625,44 @@ class TenderImportTests(TestCase):
 
         self.assertEqual(result["created"], 1)
         self.assertTrue(Tender.objects.filter(number="MAP-1").exists())
+
+    @patch("procurement.imports.fetch_json")
+    def test_bidzaar_adapter_paginates_and_maps_items(self, fetch_json):
+        self.source.adapter = TenderImportSource.Adapter.BIDZAAR
+        self.source.url = (
+            "https://bidzaar.com/app/requests/public/buy"
+            "?sorting.key=publishDate&sorting.direction=desc&logic=and"
+            "&filters%5B0%5D.operator=in&filters%5B0%5D.field=companyId"
+            "&filters%5B0%5D.value=%5Bcompany-id%5D&id=selected-id"
+        )
+        self.source.save(update_fields=["adapter", "url"])
+        base_item = {
+            "id": "bidzaar-1",
+            "number": "341-001",
+            "name": "Монтаж оборудования",
+            "companyName": "ВАЙЛДБЕРРИЗ",
+            "status": 1,
+            "acceptanceEndDate": self.item["deadline"],
+            "publishDate": self.item["deadline"],
+            "deliveryAddresses": [{"comment": "Коледино"}],
+        }
+        fetch_json.side_effect = [
+            {"items": [base_item], "totalCount": 2},
+            {
+                "items": [{**base_item, "id": "bidzaar-2", "number": "341-002", "status": 3}],
+                "totalCount": 2,
+            },
+        ]
+
+        items = fetch_bidzaar_items(self.source)
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["delivery_address"], "Коледино")
+        self.assertEqual(items[0]["status"], Tender.Status.PUBLISHED)
+        self.assertEqual(items[1]["status"], Tender.Status.COMPLETED)
+        self.assertEqual(items[0]["url"], "https://bidzaar.com/app/process/light/bidzaar-1")
+        first_url = fetch_json.call_args_list[0].args[0]
+        self.assertIn("procedureType", first_url)
+        self.assertNotIn("selected-id", first_url)
+        self.assertIn("paging.page=1", first_url)
+        self.assertIn("paging.size=100", first_url)

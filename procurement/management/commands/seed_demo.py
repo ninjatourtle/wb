@@ -6,8 +6,10 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from procurement.models import (
-    Bid, Membership, Organization, Profile, Question, SupplierApplication, Tender, TenderLot,
+    Bid, Membership, Organization, Profile, Question, SupplierApplication, Tender, TenderImportSource,
+    TenderLot,
 )
+from procurement.management.commands.configure_bidzaar_source import DEFAULT_URL
 
 
 class Command(BaseCommand):
@@ -26,6 +28,17 @@ class Command(BaseCommand):
             defaults={"company_name": customer_org.name, "inn": customer_org.inn, "role": Profile.Role.CUSTOMER, "organization": customer_org},
         )
         Membership.objects.update_or_create(user=customer, organization=customer_org, defaults={"role": Membership.Role.OWNER})
+        TenderImportSource.objects.update_or_create(
+            name="Wildberries на Bidzaar",
+            defaults={
+                "url": DEFAULT_URL,
+                "adapter": TenderImportSource.Adapter.BIDZAAR,
+                "organization": customer_org,
+                "owner": customer,
+                "is_active": True,
+                "cancel_missing": False,
+            },
+        )
         suppliers = []
         for idx, (username, company) in enumerate([("supplier", "ООО «ТехПоставка»"), ("partner", "АО «ПромРесурс»")]):
             user, _ = User.objects.get_or_create(username=username)

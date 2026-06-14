@@ -124,3 +124,19 @@ docker compose exec web python manage.py sync_external_tenders
 
 Если внешний сайт не предоставляет JSON API, добавьте отдельный адаптер получения
 данных в `procurement/imports.py`; бизнес-логика обновления останется без изменений.
+
+### Wildberries на Bidzaar
+
+Для публичного каталога Wildberries на Bidzaar добавлен отдельный адаптер с
+пагинацией и преобразованием статусов. Настройте источник командой:
+
+```bash
+docker compose exec web python manage.py configure_bidzaar_source \
+  --owner customer --organization-inn 7701234567
+docker compose exec web python manage.py sync_external_tenders
+```
+
+Адаптер импортирует все закупки из каталога Wildberries и раз в час обновляет их
+статусы. Статусы Bidzaar преобразуются так: `1` и `8` — прием заявок, `2` —
+рассмотрение, `3` — завершен. Исходная карточка Bidzaar доступна по кнопке на
+странице импортированной закупки.

@@ -155,8 +155,15 @@ class Tender(models.Model):
 
 
 class TenderImportSource(models.Model):
+    class Adapter(models.TextChoices):
+        JSON = "json", "Универсальный JSON API"
+        BIDZAAR = "bidzaar", "Bidzaar"
+
     name = models.CharField("Название источника", max_length=120, unique=True)
     url = models.URLField("URL JSON API", max_length=500)
+    adapter = models.CharField(
+        "Адаптер", max_length=20, choices=Adapter.choices, default=Adapter.JSON
+    )
     organization = models.ForeignKey(
         Organization, on_delete=models.PROTECT, related_name="tender_import_sources"
     )

@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from django.db import transaction
@@ -62,6 +63,9 @@ def value_at(data, path, default=None):
 
 
 def fetch_source_items(source):
+    if source.adapter == TenderImportSource.Adapter.BIDZAAR:
+        return fetch_bidzaar_items(source)
+
     headers = {"Accept": "application/json", "User-Agent": "TenderFlow/1.0"}
     if source.auth_header and source.auth_env_var:
         token = os.getenv(source.auth_env_var)
@@ -80,6 +84,110 @@ def fetch_source_items(source):
         items = items.get("items") or items.get("results") or items.get("data")
     if not isinstance(items, list):
         raise TenderImportError("Ответ источника не содержит список тендеров")
+    return items
+
+
+def fetch_json(url, headers=None):
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "TenderFlow/1.0",
+            **(headers or {}),
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise TenderImportError(f"Не удалось получить данные: {exc}") from exc
+
+
+def bidzaar_category(title):
+    value = title.lower()
+    if any(word in value for word in ("монтаж", "ремонт", "строитель", "устройств", "работ")):
+        return Tender.Category.CONSTRUCTION
+    if any(word in value for word in ("обслужив", "услуг", "утилизац", "перевоз", "аренд")):
+        return Tender.Category.SERVICES
+    if any(word in value for word in ("сервер", "программ", "информац", "связ", "телеком")):
+        return Tender.Category.IT
+    return Tender.Category.GOODS
+
+
+def bidzaar_address(addresses):
+    values = []
+    for address in addresses or []:
+        value = address.get("comment") or address.get("search")
+        if value:
+            values.append(value)
+    return "; ".join(values) or "Не указан"
+
+
+def transform_bidzaar_item(item, origin):
+    external_id = str(item["id"])
+    title = str(item.get("name") or item.get("number") or external_id)
+    status = {
+        1: Tender.Status.PUBLISHED,
+        2: Tender.Status.REVIEW,
+        3: Tender.Status.COMPLETED,
+        8: Tender.Status.PUBLISHED,
+    }.get(item.get("status"), Tender.Status.PUBLISHED)
+    deadline = item.get("acceptanceEndDate") or item.get("finishDate") or item.get("publishDate")
+    published = item.get("publishDate") or "не указана"
+    return {
+        "id": external_id,
+        "number": item.get("number") or external_id,
+        "title": title,
+        "category": bidzaar_category(title),
+        "description": (
+            f"Закупка компании {item.get('companyName') or 'ВАЙЛДБЕРРИЗ'}, "
+            f"опубликована на Bidzaar {published}."
+        ),
+        "requirements": "Условия участия и документы доступны в оригинальной закупке на Bidzaar.",
+        "delivery_address": bidzaar_address(item.get("deliveryAddresses")),
+        "budget": "0",
+        "deadline": deadline,
+        "procedure": Tender.Procedure.CLOSED,
+        "status": status,
+        "url": f"{origin}/app/process/light/{external_id}",
+        "bidzaar": item,
+    }
+
+
+def fetch_bidzaar_items(source):
+    parts = urlsplit(source.url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    params = [(key, value) for key, value in parse_qsl(parts.query) if key != "id"]
+    filter_indexes = [
+        int(key.split("[", 1)[1].split("]", 1)[0])
+        for key, _ in params
+        if key.startswith("filters[") and "]." in key
+    ]
+    if not any(key.endswith(".field") and value == "procedureType" for key, value in params):
+        index = max(filter_indexes, default=-1) + 1
+        params.extend([
+            (f"filters[{index}].operator", "eq"),
+            (f"filters[{index}].field", "procedureType"),
+            (f"filters[{index}].value", "1"),
+        ])
+    params = [
+        (key, value)
+        for key, value in params
+        if key not in {"paging.page", "paging.size"}
+    ]
+    api_url = urlunsplit((parts.scheme, parts.netloc, "/api/process/light/procedures/available", "", ""))
+    page = 1
+    page_size = 100
+    items = []
+    while True:
+        query = urlencode([*params, ("paging.page", page), ("paging.size", page_size)])
+        payload = fetch_json(f"{api_url}?{query}")
+        page_items = payload.get("items", [])
+        items.extend(transform_bidzaar_item(item, origin) for item in page_items)
+        total = int(payload.get("totalCount", len(items)))
+        if not page_items or len(items) >= total:
+            break
+        page += 1
     return items
 
 
