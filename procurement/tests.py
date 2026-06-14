@@ -416,6 +416,33 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(reverse("dashboard"))
         self.assertNotContains(response, "70000")
 
+    def test_customer_dashboard_filters_tenders(self):
+        Tender.objects.create(
+            owner=self.customer, organization=self.customer.profile.organization,
+            title="ИТ услуги", number="IT-001", category=Tender.Category.IT,
+            description="Описание", delivery_address="Москва", budget=50000,
+            deadline=timezone.now() + timedelta(days=5), status=Tender.Status.DRAFT,
+        )
+        self.client.login(username="customer", password="testpass123")
+        response = self.client.get(reverse("dashboard"), {"q": "ИТ", "status": Tender.Status.DRAFT})
+        self.assertContains(response, "ИТ услуги")
+        self.assertNotContains(response, "Поставка оборудования")
+        self.assertEqual(response.context["page_obj"].paginator.count, 1)
+
+    def test_customer_dashboard_paginates_tenders(self):
+        for index in range(25):
+            Tender.objects.create(
+                owner=self.customer, organization=self.customer.profile.organization,
+                title=f"Закупка {index}", number=f"P-{index}", category=Tender.Category.GOODS,
+                description="Описание", delivery_address="Москва", budget=1000,
+                deadline=timezone.now() + timedelta(days=5), status=Tender.Status.PUBLISHED,
+            )
+        self.client.login(username="customer", password="testpass123")
+        response = self.client.get(reverse("dashboard"))
+        self.assertEqual(response.context["page_obj"].paginator.count, 26)
+        self.assertEqual(len(response.context["tenders"]), 25)
+        self.assertContains(response, "Далее")
+
     def test_unapproved_supplier_cannot_ask_question(self):
         application = self.supplier.profile.organization.supplier_applications.get(
             customer=self.customer.profile.organization

@@ -192,10 +192,34 @@ def dashboard(request):
         raise PermissionDenied
     notifications = request.user.notifications.all()[:6]
     if profile.role == Profile.Role.CUSTOMER:
-        tenders = Tender.objects.filter(organization=profile.organization).annotate(bid_count=Count("bids"), lowest_price=Min("bids__price"))
-        for tender in tenders:
+        organization_tenders = Tender.objects.filter(organization=profile.organization)
+        query = request.GET.get("q", "").strip()
+        status = request.GET.get("status", "")
+        category = request.GET.get("category", "")
+        procedure = request.GET.get("procedure", "")
+        source = request.GET.get("source", "")
+        tenders = organization_tenders
+        if query:
+            tenders = tenders.filter(Q(title__icontains=query) | Q(number__icontains=query))
+        if status:
+            tenders = tenders.filter(status=status)
+        if category:
+            tenders = tenders.filter(category=category)
+        if procedure:
+            tenders = tenders.filter(procedure=procedure)
+        if source == "imported":
+            tenders = tenders.filter(import_record__isnull=False)
+        elif source == "local":
+            tenders = tenders.filter(import_record__isnull=True)
+        tenders = tenders.annotate(
+            bid_count=Count("bids"), lowest_price=Min("bids__price")
+        ).order_by("-created_at", "-pk")
+        page = Paginator(tenders, 25).get_page(request.GET.get("page"))
+        for tender in page:
             if tender.procedure == Tender.Procedure.CLOSED and tender.is_open:
                 tender.lowest_price = None
+        pagination_params = request.GET.copy()
+        pagination_params.pop("page", None)
         pending = SupplierApplication.objects.filter(
             customer=profile.organization,
             status=SupplierApplication.Status.PENDING,
@@ -205,8 +229,13 @@ def dashboard(request):
             decision=TenderApproval.Decision.PENDING,
         ).select_related("tender", "requested_by")
         return render(request, "procurement/dashboard_customer.html", {
-            "tenders": tenders, "pending_applications": pending, "notifications": notifications,
-            "total_budget": tenders.aggregate(v=Sum("budget"))["v"] or 0, "pending_approvals": approvals,
+            "tenders": page, "page_obj": page, "pending_applications": pending, "notifications": notifications,
+            "total_tenders": organization_tenders.count(),
+            "total_budget": organization_tenders.aggregate(v=Sum("budget"))["v"] or 0,
+            "pending_approvals": approvals, "query": query, "status": status, "category": category,
+            "procedure": procedure, "source": source, "statuses": Tender.Status.choices,
+            "categories": Tender.Category.choices, "procedures": Tender.Procedure.choices,
+            "pagination_query": pagination_params.urlencode(),
         })
     bids = request.user.bids.select_related("tender", "tender__owner__profile")
     application = profile.organization.supplier_applications.order_by("submitted_at").first() if profile.organization else None
