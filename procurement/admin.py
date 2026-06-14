@@ -2,7 +2,7 @@ from django.contrib import admin
 from .models import (
     AuditEvent, Bid, BidLot, Contract, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
     ImportedTender, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
-    TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot,
+    TenderImportRun, TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot,
 )
 
 admin.site.site_header = "WB Tender — администрирование"
@@ -27,6 +27,7 @@ ADMIN_MODEL_NAMES = {
     TenderApproval: ("согласование закупки", "согласования закупок"),
     TenderDocument: ("документ закупки", "документы закупок"),
     TenderImportSource: ("источник импорта", "источники импорта"),
+    TenderImportRun: ("запуск импорта", "запуски импорта"),
     TenderLot: ("лот закупки", "лоты закупок"),
     TenderNumberSequence: ("счетчик номеров", "счетчики номеров"),
     TenderTemplate: ("шаблон закупки", "шаблоны закупок"),
@@ -205,6 +206,15 @@ class TenderImportSourceAdmin(BaseAdmin):
     list_display = ("name", "adapter", "organization", "is_active", "last_synced_at", "last_error")
     list_filter = ("adapter", "is_active", "organization")
     search_fields = ("name", "url")
+
+
+@admin.register(TenderImportRun)
+class TenderImportRunAdmin(BaseAdmin):
+    list_display = ("created_at", "source", "trigger", "status", "requested_by", "finished_at")
+    list_filter = ("status", "trigger", "source")
+    search_fields = ("source__name", "error", "requested_by__username")
+    readonly_fields = ("source", "trigger", "status", "requested_by", "result", "error", "started_at", "finished_at", "created_at")
+    list_select_related = ("source", "requested_by")
 
 
 @admin.register(ImportedTender)

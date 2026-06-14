@@ -239,6 +239,36 @@ class TenderImportSource(models.Model):
         return self.name
 
 
+class TenderImportRun(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "В очереди"
+        RUNNING = "running", "Выполняется"
+        SUCCESS = "success", "Успешно"
+        PARTIAL = "partial", "Завершено с ошибками"
+        FAILED = "failed", "Ошибка"
+
+    class Trigger(models.TextChoices):
+        SCHEDULED = "scheduled", "По расписанию"
+        MANUAL = "manual", "Вручную"
+
+    source = models.ForeignKey(
+        TenderImportSource, on_delete=models.CASCADE, related_name="runs"
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    trigger = models.CharField(max_length=16, choices=Trigger.choices, default=Trigger.SCHEDULED)
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="requested_import_runs"
+    )
+    result = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
 class ImportedTender(models.Model):
     source = models.ForeignKey(
         TenderImportSource, on_delete=models.CASCADE, related_name="imported_tenders"

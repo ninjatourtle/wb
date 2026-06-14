@@ -23,7 +23,7 @@ from .forms import (
 from .models import (
     AuditEvent, Bid, BidLot, Contract, Membership, Organization, ProcurementProtocol, Profile,
     Question, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
-    TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderLot,
+    TenderImportRun, TenderImportSource, TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderLot,
 )
 from .services import notify_user
 
@@ -293,6 +293,16 @@ def dashboard(request):
         if organization:
             pending = pending.filter(customer=organization)
             approvals = approvals.filter(tender__organization=organization)
+        import_sources = TenderImportSource.objects.filter(
+            organization__in=organizations
+        ).select_related("organization")
+        if organization:
+            import_sources = import_sources.filter(organization=organization)
+        import_runs = TenderImportRun.objects.filter(
+            source__organization__in=organizations
+        ).select_related("source", "source__organization", "requested_by")
+        if organization:
+            import_runs = import_runs.filter(source__organization=organization)
         return render(request, "procurement/dashboard_customer.html", {
             "tenders": page, "page_obj": page, "pending_applications": pending, "notifications": notifications,
             "total_tenders": organization_tenders.count(),
@@ -317,6 +327,12 @@ def dashboard(request):
             "can_review_any": accessible_customer_organizations(
                 request.user, [Membership.Role.OWNER, Membership.Role.REVIEWER]
             ).exists(),
+            "import_sources": import_sources, "import_runs": import_runs[:8],
+            "manageable_import_source_ids": set(TenderImportSource.objects.filter(
+                organization__in=accessible_customer_organizations(
+                    request.user, [Membership.Role.OWNER, Membership.Role.MANAGER]
+                )
+            ).values_list("pk", flat=True)),
         })
     bid_query = request.GET.get("q", "").strip()
     bid_status = request.GET.get("status", "")
@@ -957,6 +973,33 @@ def audit_registry(request):
         "organizations": organizations, "organization": organization,
         "pagination_query": pagination_params.urlencode(),
     })
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+def run_tender_import(request, source_pk):
+    if request.method != "POST":
+        raise PermissionDenied
+    source = get_object_or_404(
+        TenderImportSource,
+        pk=source_pk,
+        organization__memberships__user=request.user,
+        organization__memberships__is_active=True,
+        organization__memberships__role__in=[Membership.Role.OWNER, Membership.Role.MANAGER],
+    )
+    if source.runs.filter(status__in=[
+        TenderImportRun.Status.QUEUED, TenderImportRun.Status.RUNNING,
+    ], created_at__gte=timezone.now() - timedelta(hours=2)).exists():
+        messages.warning(request, "Парсер этого источника уже запущен.")
+        return redirect("dashboard")
+    run = TenderImportRun.objects.create(
+        source=source, trigger=TenderImportRun.Trigger.MANUAL, requested_by=request.user
+    )
+    from .tasks import sync_external_tender_source
+
+    sync_external_tender_source.delay(source.pk, run.pk)
+    audit(request.user, "tender_import.requested", run, organization=source.organization)
+    messages.success(request, "Парсер поставлен в очередь. Результат появится в кабинете.")
+    return redirect("dashboard")
 
 
 @membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER, Membership.Role.REVIEWER)

@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.html import strip_tags
 
-from .models import AuditEvent, ImportedTender, Tender, TenderImportSource, TenderLot
+from .models import AuditEvent, ImportedTender, Tender, TenderImportRun, TenderImportSource, TenderLot
 
 
 logger = logging.getLogger(__name__)
@@ -583,15 +583,37 @@ def sync_source(source):
     return result
 
 
+def run_source_sync(source, run=None, trigger=TenderImportRun.Trigger.SCHEDULED, requested_by=None):
+    run = run or TenderImportRun.objects.create(
+        source=source, trigger=trigger, requested_by=requested_by
+    )
+    run.status = TenderImportRun.Status.RUNNING
+    run.started_at = timezone.now()
+    run.save(update_fields=["status", "started_at"])
+    try:
+        result = sync_source(source)
+        run.result = result
+        run.status = (
+            TenderImportRun.Status.PARTIAL
+            if result.get("failed")
+            else TenderImportRun.Status.SUCCESS
+        )
+        run.error = source.last_error
+    except Exception as exc:
+        source.last_error = str(exc)
+        source.last_synced_at = timezone.now()
+        source.save(update_fields=["last_error", "last_synced_at"])
+        run.status = TenderImportRun.Status.FAILED
+        run.error = str(exc)
+        logger.exception("Failed to sync tender source %s", source.name)
+    run.finished_at = timezone.now()
+    run.save(update_fields=["status", "result", "error", "finished_at"])
+    return run
+
+
 def sync_active_sources():
     results = {}
     for source in TenderImportSource.objects.filter(is_active=True):
-        try:
-            results[source.name] = sync_source(source)
-        except Exception as exc:
-            source.last_error = str(exc)
-            source.last_synced_at = timezone.now()
-            source.save(update_fields=["last_error", "last_synced_at"])
-            logger.exception("Failed to sync tender source %s", source.name)
-            results[source.name] = {"error": str(exc)}
+        run = run_source_sync(source)
+        results[source.name] = run.result or {"error": run.error}
     return results

@@ -8,11 +8,11 @@ from django.utils import timezone
 
 from .models import (
     Bid, Contract, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
-    ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportSource,
+    ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportRun, TenderImportSource,
     TenderLot, TenderTemplate,
 )
 from .forms import TenderDocumentForm, TenderForm
-from .imports import fetch_bidzaar_items, sync_source
+from .imports import fetch_bidzaar_items, run_source_sync, sync_source
 
 
 class ProcurementFlowTests(TestCase):
@@ -807,6 +807,36 @@ class TenderImportTests(TestCase):
         self.assertEqual(tender.title, "Обновленное название")
         self.assertEqual(tender.status, Tender.Status.COMPLETED)
         self.assertEqual(tender.import_record.external_id, "external-42")
+
+    @patch("procurement.imports.fetch_source_items")
+    def test_import_run_stores_result_and_status(self, fetch_source_items):
+        fetch_source_items.return_value = [self.item]
+
+        run = run_source_sync(self.source, requested_by=self.owner)
+
+        self.assertEqual(run.status, TenderImportRun.Status.SUCCESS)
+        self.assertEqual(run.result["created"], 1)
+        self.assertIsNotNone(run.started_at)
+        self.assertIsNotNone(run.finished_at)
+
+    @patch("procurement.tasks.sync_external_tender_source.delay")
+    def test_owner_can_queue_manual_import_from_dashboard(self, delay):
+        Profile.objects.create(
+            user=self.owner, company_name=self.organization.name,
+            role=Profile.Role.CUSTOMER, organization=self.organization,
+        )
+        Membership.objects.create(
+            user=self.owner, organization=self.organization, role=Membership.Role.OWNER
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.post(reverse("run_tender_import", args=[self.source.pk]))
+
+        run = TenderImportRun.objects.get(source=self.source)
+        self.assertRedirects(response, reverse("dashboard"))
+        self.assertEqual(run.trigger, TenderImportRun.Trigger.MANUAL)
+        self.assertEqual(run.status, TenderImportRun.Status.QUEUED)
+        delay.assert_called_once_with(self.source.pk, run.pk)
 
     @patch("procurement.imports.fetch_source_items")
     def test_unchanged_payload_is_idempotent(self, fetch_source_items):

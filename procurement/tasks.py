@@ -2,11 +2,12 @@ try:
     from celery import shared_task
 except ModuleNotFoundError:
     def shared_task(func):
+        func.delay = func
         return func
 from django.utils import timezone
 
-from .models import Tender
-from .imports import sync_active_sources
+from .models import Tender, TenderImportRun, TenderImportSource
+from .imports import run_source_sync, sync_active_sources
 from .services import notify_user
 
 
@@ -25,3 +26,11 @@ def close_expired_tenders():
 @shared_task
 def sync_external_tenders():
     return sync_active_sources()
+
+
+@shared_task
+def sync_external_tender_source(source_id, run_id):
+    source = TenderImportSource.objects.get(pk=source_id)
+    run = TenderImportRun.objects.get(pk=run_id, source=source)
+    run_source_sync(source, run=run)
+    return run.result or {"error": run.error}

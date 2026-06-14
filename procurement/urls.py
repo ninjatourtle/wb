@@ -19,6 +19,7 @@ urlpatterns = [
     path("protocols/<int:protocol_pk>/", views.protocol_detail, name="protocol_detail"),
     path("exports/tenders.csv", views.tender_export, name="tender_export"),
     path("audit/", views.audit_registry, name="audit_registry"),
+    path("imports/<int:source_pk>/run/", views.run_tender_import, name="run_tender_import"),
     path("employees/", views.employee_registry, name="employee_registry"),
     path("employees/invite/", views.invite_employee, name="invite_employee"),
     path("employees/<int:membership_pk>/toggle/", views.toggle_employee, name="toggle_employee"),
