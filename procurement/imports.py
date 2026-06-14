@@ -528,10 +528,10 @@ def sync_bidzaar_lots(tender, details):
             tender=tender,
             external_id=external_id,
             defaults={
-                "title": position.get("name") or f"Позиция {index}",
+                "title": (position.get("name") or f"Позиция {index}")[:250],
                 "description": position.get("description") or "",
                 "quantity": normalize_decimal(position.get("count") or 1, "quantity"),
-                "unit": position.get("unit") or "шт.",
+                "unit": (position.get("unit") or "шт.")[:30],
                 "budget": normalize_decimal(
                     position.get("startPrice") or position.get("price") or 0, "budget"
                 ),
