@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Юридические лица · WB Tender{% endblock %}
+{% block content %}
+<section class="page-hero compact"><div class="container title-row"><div><span>Структура заказчика</span><h1>Юридические лица</h1><p>Управляйте компаниями группы и доступом сотрудников.</p></div>{% if can_create %}<a class="btn light" href="{% url 'organization_create' %}">+ Добавить юрлицо</a>{% endif %}</div></section>
+<section class="section container"><div class="cards">{% for item in organizations %}<article class="panel"><span class="eyebrow">{{ item.get_kind_display }}</span><h2>{{ item.name }}</h2><p>ИНН {{ item.inn|default:"не указан" }}</p><dl><div><dt>Сотрудников</dt><dd>{{ item.employee_count }}</dd></div><div><dt>Закупок</dt><dd>{{ item.tender_count }}</dd></div></dl><a class="btn secondary wide" href="{% url 'organization_employees' item.pk %}">Сотрудники и роли</a></article>{% empty %}<div class="empty">Доступных юридических лиц нет.</div>{% endfor %}</div></section>
+{% endblock %}

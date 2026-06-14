@@ -9,9 +9,9 @@ from django.utils import timezone
 from .models import (
     Bid, Contract, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
     ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportSource,
-    TenderLot,
+    TenderLot, TenderTemplate,
 )
-from .forms import TenderDocumentForm
+from .forms import TenderDocumentForm, TenderForm
 from .imports import fetch_bidzaar_items, sync_source
 
 
@@ -132,8 +132,14 @@ class ProcurementFlowTests(TestCase):
         Bid.objects.create(tender=self.tender, supplier=other, price=90000, delivery_days=10)
         self.client.login(username="supplier", password="testpass123")
         response = self.client.post(reverse("bid_submit", args=[self.tender.pk]), {"price": 95000, "delivery_days": 8, "warranty_months": 12})
-        self.assertContains(response, "с учетом шага аукциона")
+        self.assertContains(response, "ниже текущей лучшей цены")
         self.assertFalse(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
+
+        response = self.client.post(reverse("bid_submit", args=[self.tender.pk]), {
+            "price": 89999, "delivery_days": 8, "warranty_months": 12,
+        })
+        self.assertRedirects(response, self.tender.get_absolute_url())
+        self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier, price=89999).exists())
 
     def test_unapproved_supplier_cannot_bid(self):
         application = self.supplier.profile.organization.supplier_applications.get(
@@ -258,6 +264,10 @@ class ProcurementFlowTests(TestCase):
         self.client.login(username="reviewer", password="testpass123")
         response = self.client.get(reverse("tender_create"))
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.post(reverse("tender_copy", args=[self.tender.pk])).status_code, 403)
+        self.assertEqual(self.client.post(
+            reverse("tender_save_template", args=[self.tender.pk]), {"name": "Запрещено"}
+        ).status_code, 403)
 
     def test_owner_can_invite_employee(self):
         self.client.login(username="customer", password="testpass123")
@@ -289,7 +299,6 @@ class ProcurementFlowTests(TestCase):
         self.client.login(username="approval-manager", password="testpass123")
         response = self.client.post(reverse("tender_create"), {
             "title": "Новая закупка",
-            "number": "T-APPROVAL",
             "category": Tender.Category.IT,
             "description": "Описание",
             "requirements": "",
@@ -300,8 +309,9 @@ class ProcurementFlowTests(TestCase):
             "publish_results": "on",
             "publish": "1",
         })
-        tender = Tender.objects.get(number="T-APPROVAL")
+        tender = Tender.objects.get(owner=manager, title="Новая закупка")
         self.assertRedirects(response, tender.get_absolute_url())
+        self.assertRegex(tender.number, r"^WB-\d{4}-\d{6}$")
         self.assertEqual(tender.status, Tender.Status.APPROVAL)
         self.assertTrue(TenderApproval.objects.filter(tender=tender, requested_by=manager).exists())
 
@@ -561,11 +571,42 @@ class ProcurementFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_duplicate_tender_number_in_same_organization_is_rejected(self):
+    def test_manual_tender_number_and_auction_step_are_not_in_form(self):
+        form = TenderForm(user=self.customer)
+        self.assertNotIn("number", form.fields)
+        self.assertNotIn("auction_step", form.fields)
+
+    def test_created_tenders_receive_unique_generated_numbers(self):
         self.client.login(username="customer", password="testpass123")
-        response = self.client.post(reverse("tender_create"), {
+        payload = {
             "title": "Другая закупка",
-            "number": self.tender.number,
+            "category": Tender.Category.IT,
+            "description": "Описание",
+            "requirements": "",
+            "delivery_address": "Москва",
+            "budget": 100000,
+            "deadline": (timezone.now() + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M"),
+            "procedure": Tender.Procedure.CLOSED,
+            "publish_results": "on",
+        }
+        first = self.client.post(reverse("tender_create"), payload)
+        payload["title"] = "Еще одна закупка"
+        second = self.client.post(reverse("tender_create"), payload)
+        created = list(Tender.objects.filter(owner=self.customer, number__startswith=f"WB-{timezone.now().year}-").order_by("number"))
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(len(created), 2)
+        self.assertNotEqual(created[0].number, created[1].number)
+
+    def test_customer_can_create_tender_for_second_legal_entity(self):
+        second_org = Organization.objects.create(name="Второе юрлицо", kind=Organization.Kind.CUSTOMER)
+        Membership.objects.create(user=self.customer, organization=second_org, role=Membership.Role.MANAGER)
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.post(reverse("tender_create"), {
+            "organization": second_org.pk,
+            "title": "Закупка второго юрлица",
             "category": Tender.Category.IT,
             "description": "Описание",
             "requirements": "",
@@ -576,9 +617,129 @@ class ProcurementFlowTests(TestCase):
             "publish_results": "on",
         })
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Закупка с таким номером уже существует")
-        self.assertEqual(Tender.objects.filter(number=self.tender.number).count(), 1)
+        tender = Tender.objects.get(title="Закупка второго юрлица")
+        self.assertRedirects(response, tender.get_absolute_url())
+        self.assertEqual(tender.organization, second_org)
+        self.assertEqual(tender.status, Tender.Status.DRAFT)
+
+    def test_dashboard_combines_and_filters_accessible_organizations(self):
+        second_org = Organization.objects.create(name="Второе юрлицо", kind=Organization.Kind.CUSTOMER)
+        Membership.objects.create(user=self.customer, organization=second_org, role=Membership.Role.OWNER)
+        second_tender = Tender.objects.create(
+            owner=self.customer, organization=second_org, title="Закупка второго юрлица",
+            number="EXT-SECOND", category=Tender.Category.IT, description="Описание",
+            delivery_address="Москва", budget=1000, deadline=timezone.now() + timedelta(days=2),
+        )
+        self.client.login(username="customer", password="testpass123")
+
+        combined = self.client.get(reverse("dashboard"))
+        filtered = self.client.get(reverse("dashboard"), {"organization": second_org.pk})
+
+        self.assertContains(combined, self.tender.title)
+        self.assertContains(combined, second_tender.title)
+        self.assertNotContains(filtered, self.tender.title)
+        self.assertContains(filtered, second_tender.title)
+
+    def test_accreditation_is_separate_for_each_customer_organization(self):
+        second_org = Organization.objects.create(name="Второе юрлицо", kind=Organization.Kind.CUSTOMER)
+        second_tender = Tender.objects.create(
+            owner=self.customer, organization=second_org, title="Закрытая закупка",
+            number="EXT-CLOSED", category=Tender.Category.IT, description="Описание",
+            delivery_address="Москва", budget=1000, deadline=timezone.now() + timedelta(days=2),
+            status=Tender.Status.PUBLISHED,
+        )
+        self.client.login(username="supplier", password="testpass123")
+
+        response = self.client.post(reverse("bid_submit", args=[second_tender.pk]), {
+            "price": 900, "delivery_days": 2, "warranty_months": 0,
+        })
+
+        self.assertRedirects(response, reverse("dashboard"))
+        self.assertFalse(Bid.objects.filter(tender=second_tender, supplier=self.supplier).exists())
+
+    def test_owner_creates_organization_and_gets_owner_membership(self):
+        self.client.login(username="customer", password="testpass123")
+        response = self.client.post(reverse("organization_create"), {
+            "name": "Новое юридическое лицо",
+            "inn": "7700000099",
+            "kpp": "770001001",
+            "legal_address": "Москва",
+            "contact_email": "legal@example.ru",
+            "phone": "+70000000000",
+        })
+
+        organization = Organization.objects.get(name="Новое юридическое лицо")
+        self.assertRedirects(response, reverse("organization_registry"))
+        self.assertTrue(Membership.objects.filter(
+            user=self.customer, organization=organization, role=Membership.Role.OWNER
+        ).exists())
+
+    def test_owner_adds_existing_user_to_another_organization(self):
+        existing = User.objects.create_user("existing-manager", email="existing@example.ru")
+        primary = Organization.objects.create(name="Первичное юрлицо", kind=Organization.Kind.CUSTOMER)
+        Profile.objects.create(
+            user=existing, company_name=primary.name, role=Profile.Role.CUSTOMER, organization=primary
+        )
+        Membership.objects.create(user=existing, organization=primary, role=Membership.Role.MANAGER)
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.post(reverse("invite_employee"), {
+            "organization": self.customer.profile.organization.pk,
+            "email": existing.email,
+            "role": Membership.Role.REVIEWER,
+        })
+
+        self.assertRedirects(response, reverse("employee_registry"))
+        self.assertTrue(Membership.objects.filter(
+            user=existing, organization=self.customer.profile.organization, role=Membership.Role.REVIEWER
+        ).exists())
+
+    def test_disabling_one_membership_keeps_user_active_when_another_is_active(self):
+        employee = User.objects.create_user("multi-org-employee", password="testpass123")
+        Profile.objects.create(
+            user=employee, company_name="Заказчик", role=Profile.Role.CUSTOMER,
+            organization=self.customer.profile.organization,
+        )
+        first = Membership.objects.create(
+            user=employee, organization=self.customer.profile.organization, role=Membership.Role.MANAGER
+        )
+        second_org = Organization.objects.create(name="Второе юрлицо", kind=Organization.Kind.CUSTOMER)
+        Membership.objects.create(user=self.customer, organization=second_org, role=Membership.Role.OWNER)
+        Membership.objects.create(user=employee, organization=second_org, role=Membership.Role.REVIEWER)
+        self.client.login(username="customer", password="testpass123")
+
+        self.client.post(reverse("toggle_employee", args=[first.pk]))
+
+        employee.refresh_from_db()
+        first.refresh_from_db()
+        self.assertFalse(first.is_active)
+        self.assertTrue(employee.is_active)
+
+    def test_copy_and_template_create_clean_drafts_with_lots(self):
+        TenderLot.objects.create(
+            tender=self.tender, title="Позиция", description="Описание",
+            quantity=2, unit="шт.", budget=50000,
+        )
+        Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=5)
+        self.client.login(username="customer", password="testpass123")
+
+        copy_response = self.client.post(reverse("tender_copy", args=[self.tender.pk]))
+        copied = Tender.objects.exclude(pk=self.tender.pk).get(title=self.tender.title)
+        template_response = self.client.post(
+            reverse("tender_save_template", args=[self.tender.pk]), {"name": "Типовой шаблон"}
+        )
+        template = TenderTemplate.objects.get(name="Типовой шаблон")
+        from_template_response = self.client.post(reverse("tender_create_from_template", args=[template.pk]))
+        from_template = Tender.objects.exclude(pk__in=[self.tender.pk, copied.pk]).get(title=self.tender.title)
+
+        self.assertRedirects(copy_response, reverse("tender_edit", args=[copied.pk]))
+        self.assertRedirects(template_response, reverse("tender_template_registry"))
+        self.assertRedirects(from_template_response, reverse("tender_edit", args=[from_template.pk]))
+        for draft in (copied, from_template):
+            self.assertEqual(draft.status, Tender.Status.DRAFT)
+            self.assertEqual(draft.lots.count(), 1)
+            self.assertEqual(draft.bids.count(), 0)
+            self.assertNotEqual(draft.number, self.tender.number)
 
     def test_non_owner_cannot_edit_organization_details(self):
         manager = User.objects.create_user("profile-manager", password="testpass123")

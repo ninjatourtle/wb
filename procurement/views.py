@@ -1,3 +1,4 @@
+from datetime import timedelta
 from functools import wraps
 
 from django.contrib import messages
@@ -17,20 +18,26 @@ from django.utils import timezone
 from .forms import (
     AnswerForm, BidForm, EmployeeInviteForm, OrganizationForm,
     QuestionForm, RegisterForm, SupplierDocumentForm, TenderDocumentForm,
-    TenderForm, TenderLotForm, bid_lot_formset,
+    TenderForm, TenderLotForm, TenderTemplateForm, bid_lot_formset,
 )
 from .models import (
     AuditEvent, Bid, BidLot, Contract, Membership, Organization, ProcurementProtocol, Profile,
     Question, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
+    TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderLot,
 )
 from .services import notify_user
 
 
-def audit(user, action, obj=None, **details):
+def audit(user, action, obj=None, organization=None, **details):
     profile = getattr(user, "profile", None) if user and user.is_authenticated else None
+    organization = organization or (getattr(obj, "organization", None) if obj else None)
+    if not organization and obj:
+        organization = getattr(obj, "customer", None)
+    if not organization and obj and hasattr(obj, "tender"):
+        organization = obj.tender.organization
     AuditEvent.objects.create(
         user=user if user and user.is_authenticated else None,
-        organization=getattr(profile, "organization", None),
+        organization=organization or getattr(profile, "organization", None),
         action=action,
         object_type=obj.__class__.__name__ if obj else "",
         object_id=str(obj.pk) if obj else "",
@@ -57,11 +64,10 @@ def membership_role_required(*roles):
         @login_required
         def wrapped(request, *args, **kwargs):
             profile = getattr(request.user, "profile", None)
-            if not profile or profile.role != Profile.Role.CUSTOMER or not profile.organization_id:
+            if not profile or profile.role != Profile.Role.CUSTOMER:
                 raise PermissionDenied
             if not Membership.objects.filter(
                 user=request.user,
-                organization=profile.organization,
                 is_active=True,
                 role__in=roles,
             ).exists():
@@ -69,6 +75,33 @@ def membership_role_required(*roles):
             return view_func(request, *args, **kwargs)
         return wrapped
     return decorator
+
+
+def accessible_customer_organizations(user, roles=None):
+    memberships = Membership.objects.filter(
+        user=user, is_active=True, organization__kind=Organization.Kind.CUSTOMER
+    )
+    if roles:
+        memberships = memberships.filter(role__in=roles)
+    return Organization.objects.filter(memberships__in=memberships).distinct()
+
+
+def selected_organization(request, organizations):
+    organization_id = request.GET.get("organization") or request.POST.get("organization")
+    if organization_id:
+        return organizations.filter(pk=organization_id).first()
+    return None
+
+
+def generate_tender_number():
+    year = timezone.now().year
+    sequence, _ = TenderNumberSequence.objects.select_for_update().get_or_create(year=year)
+    while True:
+        sequence.last_value += 1
+        number = f"WB-{year}-{sequence.last_value:06d}"
+        if not Tender.objects.filter(number=number).exists():
+            sequence.save(update_fields=["last_value"])
+            return number
 
 
 def manageable_tender_or_404(user, pk):
@@ -209,12 +242,16 @@ def dashboard(request):
         raise PermissionDenied
     notifications = request.user.notifications.all()[:6]
     if profile.role == Profile.Role.CUSTOMER:
-        organization_tenders = Tender.objects.filter(organization=profile.organization)
+        organizations = accessible_customer_organizations(request.user)
+        organization = selected_organization(request, organizations)
+        organization_tenders = Tender.objects.filter(organization__in=organizations)
         query = request.GET.get("q", "").strip()
         status = request.GET.get("status", "")
         category = request.GET.get("category", "")
         procedure = request.GET.get("procedure", "")
         source = request.GET.get("source", "")
+        if organization:
+            organization_tenders = organization_tenders.filter(organization=organization)
         if status not in Tender.Status.values:
             status = ""
         if category not in Tender.Category.values:
@@ -246,13 +283,16 @@ def dashboard(request):
         pagination_params = request.GET.copy()
         pagination_params.pop("page", None)
         pending = SupplierApplication.objects.filter(
-            customer=profile.organization,
+            customer__in=organizations,
             status=SupplierApplication.Status.PENDING,
-        ).select_related("organization")
+        ).select_related("organization", "customer")
         approvals = TenderApproval.objects.filter(
-            tender__organization=profile.organization,
+            tender__organization__in=organizations,
             decision=TenderApproval.Decision.PENDING,
         ).select_related("tender", "requested_by")
+        if organization:
+            pending = pending.filter(customer=organization)
+            approvals = approvals.filter(tender__organization=organization)
         return render(request, "procurement/dashboard_customer.html", {
             "tenders": page, "page_obj": page, "pending_applications": pending, "notifications": notifications,
             "total_tenders": organization_tenders.count(),
@@ -267,6 +307,16 @@ def dashboard(request):
             "procedure": procedure, "source": source, "statuses": Tender.Status.choices,
             "categories": Tender.Category.choices, "procedures": Tender.Procedure.choices,
             "pagination_query": pagination_params.urlencode(),
+            "organizations": organizations, "organization": organization,
+            "can_create": accessible_customer_organizations(
+                request.user, [Membership.Role.OWNER, Membership.Role.MANAGER]
+            ).exists(),
+            "can_manage_organizations": accessible_customer_organizations(
+                request.user, [Membership.Role.OWNER]
+            ).exists(),
+            "can_review_any": accessible_customer_organizations(
+                request.user, [Membership.Role.OWNER, Membership.Role.REVIEWER]
+            ).exists(),
         })
     bid_query = request.GET.get("q", "").strip()
     bid_status = request.GET.get("status", "")
@@ -300,13 +350,15 @@ def dashboard(request):
 
 
 @membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+@transaction.atomic
 def tender_create(request):
-    form = TenderForm(request.POST or None, organization=request.user.profile.organization)
+    form = TenderForm(request.POST or None, user=request.user)
     if request.method == "POST" and form.is_valid():
         tender = form.save(commit=False)
         tender.owner = request.user
-        tender.organization = request.user.profile.organization
-        membership = request.user.memberships.get(organization=request.user.profile.organization, is_active=True)
+        tender.number = generate_tender_number()
+        tender.auction_step = None
+        membership = request.user.memberships.get(organization=tender.organization, is_active=True)
         if "publish" in request.POST and membership.role == Membership.Role.OWNER:
             tender.status = Tender.Status.PUBLISHED
         elif "publish" in request.POST:
@@ -328,11 +380,11 @@ def tender_edit(request, pk):
     if tender.status != Tender.Status.DRAFT:
         messages.error(request, "Редактировать можно только черновик.")
         return redirect(tender)
-    form = TenderForm(request.POST or None, instance=tender, organization=request.user.profile.organization)
+    form = TenderForm(request.POST or None, instance=tender, user=request.user)
     if request.method == "POST" and form.is_valid():
         tender = form.save()
         if "publish" in request.POST:
-            membership = request.user.memberships.get(organization=request.user.profile.organization, is_active=True)
+            membership = request.user.memberships.get(organization=tender.organization, is_active=True)
             tender.status = Tender.Status.PUBLISHED if membership.role == Membership.Role.OWNER else Tender.Status.APPROVAL
             tender.save(update_fields=["status"])
             if tender.status == Tender.Status.APPROVAL:
@@ -398,13 +450,13 @@ def bid_submit(request, pk):
                 new_bid.price = sum(lot_form.cleaned_data["price"] for lot_form in lot_formset)
                 new_bid.delivery_days = max(lot_form.cleaned_data["delivery_days"] for lot_form in lot_formset)
         current_best_price = tender.best_price
-        required_price = current_best_price - tender.auction_step if current_best_price and tender.auction_step else current_best_price
+        required_price = current_best_price
         if form.errors:
             pass
         elif tender.budget and new_bid.price > tender.budget:
             form.add_error("price", "Предложение не может превышать начальную цену.")
-        elif tender.procedure == Tender.Procedure.AUCTION and required_price is not None and new_bid.price > required_price:
-            form.add_error("price", f"Ставка должна быть не выше {required_price} ₽ с учетом шага аукциона.")
+        elif tender.procedure == Tender.Procedure.AUCTION and required_price is not None and new_bid.price >= required_price:
+            form.add_error("price", f"Ставка должна быть ниже текущей лучшей цены {required_price} ₽.")
         else:
             new_bid.tender, new_bid.supplier, new_bid.status = tender, request.user, Bid.Status.SUBMITTED
             new_bid.save()
@@ -496,7 +548,9 @@ def review_supplier(request, application_pk, decision):
     application = get_object_or_404(
         SupplierApplication,
         pk=application_pk,
-        customer=request.user.profile.organization,
+        customer__memberships__user=request.user,
+        customer__memberships__is_active=True,
+        customer__memberships__role__in=[Membership.Role.OWNER, Membership.Role.MANAGER],
     )
     if request.method != "POST" or decision not in {"approve", "reject"}:
         raise PermissionDenied
@@ -506,7 +560,7 @@ def review_supplier(request, application_pk, decision):
     application.save()
     for profile in application.organization.profiles.all():
         notify_user(profile.user, f"Аккредитация: {application.get_status_display()}", url="/dashboard/")
-    audit(request.user, "supplier.reviewed", application, decision=decision)
+    audit(request.user, "supplier.reviewed", application, organization=application.customer, decision=decision)
     return redirect("dashboard")
 
 
@@ -517,7 +571,9 @@ def review_tender(request, approval_pk, decision):
     approval = get_object_or_404(
         TenderApproval.objects.select_related("tender"),
         pk=approval_pk,
-        tender__organization=request.user.profile.organization,
+        tender__organization__memberships__user=request.user,
+        tender__organization__memberships__is_active=True,
+        tender__organization__memberships__role__in=[Membership.Role.OWNER, Membership.Role.REVIEWER],
         decision=TenderApproval.Decision.PENDING,
     )
     approval.comment = request.POST.get("comment", "").strip()
@@ -596,19 +652,33 @@ def notifications(request):
 
 @role_required(Profile.Role.CUSTOMER)
 def supplier_registry(request):
+    organizations = accessible_customer_organizations(request.user)
+    organization = selected_organization(request, organizations)
     applications = SupplierApplication.objects.filter(
-        customer=request.user.profile.organization
-    ).select_related("organization", "reviewed_by")
+        customer__in=organizations
+    ).select_related("organization", "customer", "reviewed_by")
+    if organization:
+        applications = applications.filter(customer=organization)
     page = Paginator(applications, 30).get_page(request.GET.get("page"))
-    return render(request, "procurement/supplier_registry.html", {"applications": page, "page_obj": page})
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
+    return render(request, "procurement/supplier_registry.html", {
+        "applications": page, "page_obj": page, "organizations": organizations,
+        "organization": organization, "pagination_query": pagination_params.urlencode(),
+    })
 
 
 @membership_role_required(Membership.Role.OWNER)
-def employee_registry(request):
-    organization = request.user.profile.organization
+def employee_registry(request, organization_pk=None):
+    organizations = accessible_customer_organizations(request.user, [Membership.Role.OWNER])
+    organization = get_object_or_404(organizations, pk=organization_pk) if organization_pk else selected_organization(request, organizations)
+    memberships = Membership.objects.filter(organization__in=organizations).select_related("user", "organization")
+    if organization:
+        memberships = memberships.filter(organization=organization)
     return render(request, "procurement/employee_registry.html", {
-        "memberships": organization.memberships.select_related("user"),
-        "form": EmployeeInviteForm(),
+        "memberships": memberships,
+        "form": EmployeeInviteForm(user=request.user),
+        "organizations": organizations, "organization": organization,
     })
 
 
@@ -616,34 +686,41 @@ def employee_registry(request):
 def invite_employee(request):
     if request.method != "POST":
         raise PermissionDenied
-    form = EmployeeInviteForm(request.POST)
+    form = EmployeeInviteForm(request.POST, user=request.user)
     if not form.is_valid():
+        organizations = accessible_customer_organizations(request.user, [Membership.Role.OWNER])
         return render(request, "procurement/employee_registry.html", {
-            "memberships": request.user.profile.organization.memberships.select_related("user"),
-            "form": form,
+            "memberships": Membership.objects.filter(
+                organization__in=organizations
+            ).select_related("user", "organization"),
+            "form": form, "organizations": organizations, "organization": None,
         })
-    user = User.objects.create(
-        username=form.cleaned_data["username"],
-        email=form.cleaned_data["email"],
-        first_name=form.cleaned_data["first_name"],
-        last_name=form.cleaned_data["last_name"],
+    organization = form.cleaned_data["organization"]
+    user = User.objects.filter(email__iexact=form.cleaned_data["email"]).first()
+    if not user:
+        user = User.objects.create(
+            username=form.cleaned_data["username"],
+            email=form.cleaned_data["email"],
+            first_name=form.cleaned_data["first_name"],
+            last_name=form.cleaned_data["last_name"],
+        )
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+        Profile.objects.create(
+            user=user, role=Profile.Role.CUSTOMER, company_name=organization.name,
+            inn=organization.inn or "", phone=organization.phone, organization=organization,
+        )
+        reset_form = PasswordResetForm({"email": user.email})
+        if reset_form.is_valid():
+            reset_form.save(request=request, use_https=request.is_secure())
+    Membership.objects.update_or_create(
+        user=user, organization=organization,
+        defaults={"role": form.cleaned_data["role"], "is_active": True},
     )
-    user.set_unusable_password()
-    user.save(update_fields=["password"])
-    organization = request.user.profile.organization
-    Profile.objects.create(
-        user=user,
-        role=Profile.Role.CUSTOMER,
-        company_name=organization.name,
-        inn=organization.inn or "",
-        phone=organization.phone,
-        organization=organization,
+    audit(
+        request.user, "employee.invited", user, organization=organization,
+        role=form.cleaned_data["role"],
     )
-    Membership.objects.create(user=user, organization=organization, role=form.cleaned_data["role"])
-    reset_form = PasswordResetForm({"email": user.email})
-    if reset_form.is_valid():
-        reset_form.save(request=request, use_https=request.is_secure())
-    audit(request.user, "employee.invited", user, role=form.cleaned_data["role"])
     messages.success(request, "Сотрудник добавлен. Ссылка для установки пароля отправлена на email.")
     return redirect("employee_registry")
 
@@ -655,16 +732,21 @@ def toggle_employee(request, membership_pk):
     membership = get_object_or_404(
         Membership,
         pk=membership_pk,
-        organization=request.user.profile.organization,
+        organization__memberships__user=request.user,
+        organization__memberships__role=Membership.Role.OWNER,
+        organization__memberships__is_active=True,
     )
     if membership.user_id == request.user.id:
         messages.error(request, "Нельзя отключить собственную учетную запись.")
         return redirect("employee_registry")
     membership.is_active = not membership.is_active
     membership.save(update_fields=["is_active"])
-    membership.user.is_active = membership.is_active
+    membership.user.is_active = membership.user.memberships.filter(is_active=True).exists()
     membership.user.save(update_fields=["is_active"])
-    audit(request.user, "employee.toggled", membership, active=membership.is_active)
+    audit(
+        request.user, "employee.toggled", membership, organization=membership.organization,
+        active=membership.is_active,
+    )
     return redirect("employee_registry")
 
 
@@ -742,7 +824,8 @@ def supplier_detail(request, application_pk):
     application = get_object_or_404(
         SupplierApplication.objects.select_related("organization"),
         pk=application_pk,
-        customer=request.user.profile.organization,
+        customer__memberships__user=request.user,
+        customer__memberships__is_active=True,
     )
     return render(request, "procurement/supplier_detail.html", {"application": application})
 
@@ -758,7 +841,8 @@ def supplier_document_download(request, document_pk):
         profile.role == Profile.Role.CUSTOMER
         and SupplierApplication.objects.filter(
             organization=document.organization,
-            customer=profile.organization,
+            customer__memberships__user=request.user,
+            customer__memberships__is_active=True,
         ).exists()
     )
     if not owns_document and not customer_is_accreditor:
@@ -784,18 +868,33 @@ def contract_registry(request):
     if not profile or not profile.organization:
         raise PermissionDenied
     if profile.role == Profile.Role.CUSTOMER:
-        contracts = Contract.objects.filter(customer=profile.organization)
+        organizations = accessible_customer_organizations(request.user)
+        organization = selected_organization(request, organizations)
+        contracts = Contract.objects.filter(customer__in=organizations)
+        if organization:
+            contracts = contracts.filter(customer=organization)
     else:
+        organizations, organization = None, None
         contracts = Contract.objects.filter(supplier=profile.organization)
     page = Paginator(contracts.select_related("tender", "customer", "supplier"), 30).get_page(request.GET.get("page"))
-    return render(request, "procurement/contract_registry.html", {"contracts": page, "page_obj": page})
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
+    return render(request, "procurement/contract_registry.html", {
+        "contracts": page, "page_obj": page, "organizations": organizations, "organization": organization,
+        "pagination_query": pagination_params.urlencode(),
+    })
 
 
 @membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
 def update_contract_status(request, contract_pk, status):
     if request.method != "POST" or status not in Contract.Status.values:
         raise PermissionDenied
-    contract = get_object_or_404(Contract, pk=contract_pk, customer=request.user.profile.organization)
+    contract = get_object_or_404(
+        Contract, pk=contract_pk,
+        customer__memberships__user=request.user,
+        customer__memberships__is_active=True,
+        customer__memberships__role__in=[Membership.Role.OWNER, Membership.Role.MANAGER],
+    )
     transitions = {
         Contract.Status.PREPARATION: {Contract.Status.SIGNED, Contract.Status.TERMINATED},
         Contract.Status.SIGNED: {Contract.Status.COMPLETED, Contract.Status.TERMINATED},
@@ -829,21 +928,160 @@ def tender_export(request):
     response["Content-Disposition"] = 'attachment; filename="wildberries-tenders.csv"'
     response.write("\ufeff")
     writer = csv.writer(response)
-    writer.writerow(["Номер", "Название", "Статус", "Формат", "Бюджет", "Дедлайн", "Заявок"])
-    tenders = Tender.objects.filter(organization=request.user.profile.organization).annotate(bid_count=Count("bids"))
+    writer.writerow(["Юридическое лицо", "Номер", "Название", "Статус", "Формат", "Бюджет", "Дедлайн", "Заявок"])
+    organizations = accessible_customer_organizations(request.user)
+    organization = selected_organization(request, organizations)
+    tenders = Tender.objects.filter(organization__in=organizations).annotate(bid_count=Count("bids"))
+    if organization:
+        tenders = tenders.filter(organization=organization)
     for tender in tenders:
-        writer.writerow([tender.number, tender.title, tender.get_status_display(), tender.get_procedure_display(), tender.budget, tender.deadline, tender.bid_count])
+        writer.writerow([tender.organization.name, tender.number, tender.title, tender.get_status_display(), tender.get_procedure_display(), tender.budget, tender.deadline, tender.bid_count])
     return response
 
 
 @membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER, Membership.Role.REVIEWER)
 def audit_registry(request):
-    events = AuditEvent.objects.filter(organization=request.user.profile.organization).select_related("user")
+    organizations = accessible_customer_organizations(request.user)
+    organization = selected_organization(request, organizations)
+    events = AuditEvent.objects.filter(organization__in=organizations).select_related("user", "organization")
+    if organization:
+        events = events.filter(organization=organization)
     action = request.GET.get("action", "").strip()
     if action:
         events = events.filter(action__icontains=action)
     page = Paginator(events, 50).get_page(request.GET.get("page"))
-    return render(request, "procurement/audit_registry.html", {"events": page, "page_obj": page, "action": action})
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
+    return render(request, "procurement/audit_registry.html", {
+        "events": page, "page_obj": page, "action": action,
+        "organizations": organizations, "organization": organization,
+        "pagination_query": pagination_params.urlencode(),
+    })
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER, Membership.Role.REVIEWER)
+def organization_registry(request):
+    organizations = accessible_customer_organizations(request.user).annotate(
+        employee_count=Count("memberships", distinct=True),
+        tender_count=Count("tenders", distinct=True),
+    )
+    return render(request, "procurement/organization_registry.html", {
+        "organizations": organizations,
+        "can_create": accessible_customer_organizations(
+            request.user, [Membership.Role.OWNER]
+        ).exists(),
+    })
+
+
+@membership_role_required(Membership.Role.OWNER)
+@transaction.atomic
+def organization_create(request):
+    form = OrganizationForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        organization = form.save(commit=False)
+        organization.kind = Organization.Kind.CUSTOMER
+        organization.save()
+        Membership.objects.create(
+            organization=organization, user=request.user, role=Membership.Role.OWNER
+        )
+        audit(request.user, "organization.created", organization)
+        messages.success(request, "Юридическое лицо добавлено.")
+        return redirect("organization_registry")
+    return render(request, "procurement/organization_form.html", {"form": form})
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+def tender_template_registry(request):
+    organizations = accessible_customer_organizations(
+        request.user, [Membership.Role.OWNER, Membership.Role.MANAGER]
+    )
+    organization = selected_organization(request, organizations)
+    templates = TenderTemplate.objects.filter(organization__in=organizations).select_related("organization")
+    query = request.GET.get("q", "").strip()
+    if organization:
+        templates = templates.filter(organization=organization)
+    if query:
+        templates = templates.filter(Q(name__icontains=query) | Q(title__icontains=query))
+    return render(request, "procurement/tender_template_registry.html", {
+        "templates": templates, "organizations": organizations,
+        "organization": organization, "query": query,
+    })
+
+
+def clone_tender_data(source, owner, organization):
+    return Tender.objects.create(
+        owner=owner, organization=organization, number=generate_tender_number(),
+        title=source.title, category=source.category, description=source.description,
+        requirements=source.requirements, delivery_address=source.delivery_address,
+        budget=source.budget, deadline=timezone.now() + timedelta(days=30),
+        procedure=source.procedure, publish_results=source.publish_results,
+        status=Tender.Status.DRAFT, auction_step=None,
+    )
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+@transaction.atomic
+def tender_copy(request, pk):
+    if request.method != "POST":
+        raise PermissionDenied
+    source = manageable_tender_or_404(request.user, pk)
+    tender = clone_tender_data(source, request.user, source.organization)
+    TenderLot.objects.bulk_create([
+        TenderLot(
+            tender=tender, title=lot.title, description=lot.description,
+            quantity=lot.quantity, unit=lot.unit, budget=lot.budget,
+        ) for lot in source.lots.all()
+    ])
+    audit(request.user, "tender.copied", tender, source_id=source.pk)
+    return redirect("tender_edit", pk=tender.pk)
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+@transaction.atomic
+def tender_save_template(request, pk):
+    if request.method != "POST":
+        raise PermissionDenied
+    source = manageable_tender_or_404(request.user, pk)
+    form = TenderTemplateForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Укажите название шаблона.")
+        return redirect(source)
+    template = form.save(commit=False)
+    template.organization, template.owner = source.organization, request.user
+    for field in ("title", "category", "description", "requirements", "delivery_address", "budget", "procedure", "publish_results"):
+        setattr(template, field, getattr(source, field))
+    template.save()
+    TenderTemplateLot.objects.bulk_create([
+        TenderTemplateLot(
+            template=template, title=lot.title, description=lot.description,
+            quantity=lot.quantity, unit=lot.unit, budget=lot.budget,
+        ) for lot in source.lots.all()
+    ])
+    audit(request.user, "tender_template.created", template, source_id=source.pk)
+    messages.success(request, "Шаблон сохранен.")
+    return redirect("tender_template_registry")
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+@transaction.atomic
+def tender_create_from_template(request, template_pk):
+    if request.method != "POST":
+        raise PermissionDenied
+    template = get_object_or_404(
+        TenderTemplate, pk=template_pk,
+        organization__memberships__user=request.user,
+        organization__memberships__is_active=True,
+        organization__memberships__role__in=[Membership.Role.OWNER, Membership.Role.MANAGER],
+    )
+    tender = clone_tender_data(template, request.user, template.organization)
+    TenderLot.objects.bulk_create([
+        TenderLot(
+            tender=tender, title=lot.title, description=lot.description,
+            quantity=lot.quantity, unit=lot.unit, budget=lot.budget,
+        ) for lot in template.lots.all()
+    ])
+    audit(request.user, "tender.created_from_template", tender, template_id=template.pk)
+    return redirect("tender_edit", pk=tender.pk)
 
 
 def health(request):

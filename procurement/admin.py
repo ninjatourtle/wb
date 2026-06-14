@@ -2,7 +2,7 @@ from django.contrib import admin
 from .models import (
     AuditEvent, Bid, BidLot, Contract, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
     ImportedTender, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
-    TenderImportSource, TenderLot,
+    TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot,
 )
 
 admin.site.site_header = "WB Tender — администрирование"
@@ -28,6 +28,9 @@ ADMIN_MODEL_NAMES = {
     TenderDocument: ("документ закупки", "документы закупок"),
     TenderImportSource: ("источник импорта", "источники импорта"),
     TenderLot: ("лот закупки", "лоты закупок"),
+    TenderNumberSequence: ("счетчик номеров", "счетчики номеров"),
+    TenderTemplate: ("шаблон закупки", "шаблоны закупок"),
+    TenderTemplateLot: ("лот шаблона", "лоты шаблонов"),
 }
 for model, (singular, plural) in ADMIN_MODEL_NAMES.items():
     model._meta.verbose_name = singular
@@ -53,6 +56,11 @@ class TenderDocumentInline(admin.TabularInline):
 
 class BidLotInline(admin.TabularInline):
     model = BidLot
+    extra = 0
+
+
+class TenderTemplateLotInline(admin.TabularInline):
+    model = TenderTemplateLot
     extra = 0
 
 
@@ -178,6 +186,18 @@ class BidLotAdmin(BaseAdmin):
     list_display = ("bid", "lot", "price", "delivery_days")
     search_fields = ("bid__tender__number", "bid__supplier__username", "lot__title")
     list_select_related = ("bid", "lot")
+
+
+@admin.register(TenderTemplate)
+class TenderTemplateAdmin(BaseAdmin):
+    list_display = ("name", "organization", "title", "category", "procedure", "created_at")
+    list_filter = ("organization", "category", "procedure")
+    search_fields = ("name", "title", "organization__name")
+    inlines = (TenderTemplateLotInline,)
+
+
+admin.site.register(TenderNumberSequence, BaseAdmin)
+admin.site.register(TenderTemplateLot, BaseAdmin)
 
 
 @admin.register(TenderImportSource)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .models import (
     Bid, BidLot, Membership, Organization, Profile, Question, SupplierApplication, SupplierDocument,
-    Tender, TenderApproval, TenderDocument, TenderLot,
+    Tender, TenderApproval, TenderDocument, TenderLot, TenderTemplate,
 )
 
 
@@ -68,21 +68,47 @@ class RegisterForm(UserCreationForm):
 
 
 class TenderForm(forms.ModelForm):
+    organization = forms.ModelChoiceField(
+        label="Юридическое лицо-заказчик",
+        queryset=Organization.objects.none(),
+    )
     deadline = forms.DateTimeField(
         label="Окончание приема заявок",
         widget=forms.DateTimeInput(attrs={"type": "datetime-local"}),
         input_formats=["%Y-%m-%dT%H:%M"],
     )
 
-    def __init__(self, *args, organization=None, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.organization = organization or getattr(self.instance, "organization", None)
+        organization_ids = []
+        if user:
+            organization_ids = user.memberships.filter(
+                is_active=True,
+                role__in=[Membership.Role.OWNER, Membership.Role.MANAGER],
+                organization__kind=Organization.Kind.CUSTOMER,
+            ).values_list("organization_id", flat=True)
+        self.fields["organization"].queryset = Organization.objects.filter(pk__in=organization_ids)
+        if self.instance.pk:
+            self.fields["organization"].initial = self.instance.organization
+        elif user and getattr(getattr(user, "profile", None), "organization_id", None):
+            primary = self.fields["organization"].queryset.filter(
+                pk=user.profile.organization_id
+            ).first()
+            if primary:
+                self.fields["organization"].initial = primary
+        if not self.instance.pk and self.fields["organization"].queryset.count() == 1:
+            only_organization = self.fields["organization"].queryset.first()
+            if not self.fields["organization"].initial:
+                self.fields["organization"].initial = only_organization
+            if self.is_bound and not self.data.get("organization"):
+                self.data = self.data.copy()
+                self.data["organization"] = str(only_organization.pk)
 
     class Meta:
         model = Tender
         fields = (
+            "organization",
             "title",
-            "number",
             "category",
             "description",
             "requirements",
@@ -90,7 +116,6 @@ class TenderForm(forms.ModelForm):
             "budget",
             "deadline",
             "procedure",
-            "auction_step",
             "publish_results",
         )
         widgets = {
@@ -104,21 +129,10 @@ class TenderForm(forms.ModelForm):
             raise forms.ValidationError("Срок должен быть в будущем.")
         return deadline
 
-    def clean_number(self):
-        number = self.cleaned_data["number"].strip()
-        if self.organization:
-            existing = Tender.objects.filter(organization=self.organization, number=number)
-            if self.instance.pk:
-                existing = existing.exclude(pk=self.instance.pk)
-            if existing.exists():
-                raise forms.ValidationError("Закупка с таким номером уже существует.")
-        return number
-
-    def clean(self):
-        cleaned = super().clean()
-        if cleaned.get("procedure") == Tender.Procedure.AUCTION and not cleaned.get("auction_step"):
-            self.add_error("auction_step", "Укажите шаг для открытого аукциона.")
-        return cleaned
+class TenderTemplateForm(forms.ModelForm):
+    class Meta:
+        model = TenderTemplate
+        fields = ("name",)
 
 
 class BidForm(forms.ModelForm):
@@ -198,23 +212,44 @@ class SupplierDocumentForm(forms.ModelForm):
 
 
 class EmployeeInviteForm(forms.Form):
-    username = forms.CharField(label="Логин", max_length=150)
+    organization = forms.ModelChoiceField(
+        label="Юридическое лицо", queryset=Organization.objects.none()
+    )
+    username = forms.CharField(label="Логин нового сотрудника", max_length=150, required=False)
     email = forms.EmailField(label="Email")
     first_name = forms.CharField(label="Имя", max_length=150, required=False)
     last_name = forms.CharField(label="Фамилия", max_length=150, required=False)
     role = forms.ChoiceField(label="Роль", choices=Membership.Role.choices)
 
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user:
+            self.fields["organization"].queryset = Organization.objects.filter(
+                memberships__user=user,
+                memberships__is_active=True,
+                memberships__role=Membership.Role.OWNER,
+                kind=Organization.Kind.CUSTOMER,
+            ).distinct()
+            if self.fields["organization"].queryset.count() == 1:
+                only_organization = self.fields["organization"].queryset.first()
+                self.fields["organization"].initial = only_organization
+                if self.is_bound and not self.data.get("organization"):
+                    self.data = self.data.copy()
+                    self.data["organization"] = str(only_organization.pk)
+
     def clean_username(self):
         username = self.cleaned_data["username"]
-        if User.objects.filter(username=username).exists():
+        if username and User.objects.filter(username=username).exists():
             raise forms.ValidationError("Этот логин уже занят.")
         return username
 
-    def clean_email(self):
-        email = self.cleaned_data["email"]
-        if User.objects.filter(email__iexact=email).exists():
-            raise forms.ValidationError("Пользователь с таким email уже существует.")
-        return email
+    def clean(self):
+        cleaned = super().clean()
+        email = cleaned.get("email")
+        username = cleaned.get("username")
+        if email and not User.objects.filter(email__iexact=email).exists() and not username:
+            self.add_error("username", "Укажите логин для нового сотрудника.")
+        return cleaned
 
 
 class TenderApprovalForm(forms.ModelForm):

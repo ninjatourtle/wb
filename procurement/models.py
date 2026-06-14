@@ -154,6 +154,45 @@ class Tender(models.Model):
         ).exists()
 
 
+class TenderNumberSequence(models.Model):
+    year = models.PositiveIntegerField(unique=True)
+    last_value = models.PositiveIntegerField(default=0)
+
+
+class TenderTemplate(models.Model):
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="tender_templates"
+    )
+    owner = models.ForeignKey(User, on_delete=models.PROTECT, related_name="tender_templates")
+    name = models.CharField("Название шаблона", max_length=200)
+    title = models.CharField("Название закупки", max_length=250)
+    category = models.CharField("Категория", max_length=20, choices=Tender.Category.choices)
+    description = models.TextField("Описание")
+    requirements = models.TextField("Требования к поставщику", blank=True)
+    delivery_address = models.CharField("Место поставки", max_length=300)
+    budget = models.DecimalField("Начальная цена", max_digits=14, decimal_places=2)
+    procedure = models.CharField(
+        "Формат процедуры", max_length=16, choices=Tender.Procedure.choices
+    )
+    publish_results = models.BooleanField("Публиковать результаты", default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class TenderTemplateLot(models.Model):
+    template = models.ForeignKey(TenderTemplate, on_delete=models.CASCADE, related_name="lots")
+    title = models.CharField("Название лота", max_length=250)
+    description = models.TextField("Описание", blank=True)
+    quantity = models.DecimalField("Количество", max_digits=12, decimal_places=2, default=1)
+    unit = models.CharField("Единица измерения", max_length=30, default="шт.")
+    budget = models.DecimalField("Начальная цена", max_digits=14, decimal_places=2)
+
+
 class TenderImportSource(models.Model):
     class Adapter(models.TextChoices):
         JSON = "json", "Универсальный JSON API"
