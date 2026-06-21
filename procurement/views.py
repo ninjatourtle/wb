@@ -184,7 +184,7 @@ def home(request):
     )
     tenders = open_tenders.select_related("owner__profile", "organization").annotate(
         bid_count=Count("bids")
-    ).order_by("deadline")[:6]
+    ).order_by("-created_at", "-pk")[:6]
     completed_tenders = Tender.objects.filter(status=Tender.Status.COMPLETED).annotate(
         winner_price=Min("bids__price", filter=Q(bids__status=Bid.Status.WINNER))
     )

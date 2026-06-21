@@ -61,6 +61,25 @@ class ProcurementFlowTests(TestCase):
         self.assertContains(response, "Ответы на частые вопросы")
         self.assertContains(response, "Регистрация открывает кабинет поставщика")
 
+    def test_home_shows_newest_open_tenders_first(self):
+        older = Tender.objects.create(
+            owner=self.customer, organization=self.customer.profile.organization,
+            title="Старая закупка", number="OLD-001", category=Tender.Category.GOODS,
+            description="Описание", delivery_address="Москва", budget=1000,
+            deadline=timezone.now() + timedelta(days=1), status=Tender.Status.PUBLISHED,
+        )
+        newer = Tender.objects.create(
+            owner=self.customer, organization=self.customer.profile.organization,
+            title="Новая закупка", number="NEW-001", category=Tender.Category.GOODS,
+            description="Описание", delivery_address="Москва", budget=1000,
+            deadline=timezone.now() + timedelta(days=30), status=Tender.Status.PUBLISHED,
+        )
+
+        response = self.client.get(reverse("home"))
+
+        tenders = list(response.context["tenders"])
+        self.assertLess(tenders.index(newer), tenders.index(older))
+
     def test_catalog_explains_next_step_for_new_supplier(self):
         response = self.client.get(reverse("tender_list"))
 
