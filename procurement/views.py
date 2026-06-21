@@ -374,6 +374,8 @@ def dashboard(request):
             tenders = tenders.filter(Q(title__icontains=query) | Q(number__icontains=query))
         if status:
             tenders = tenders.filter(status=status)
+        else:
+            tenders = tenders.exclude(status=Tender.Status.COMPLETED)
         if category:
             tenders = tenders.filter(category=category)
         if procedure:
@@ -471,6 +473,8 @@ def dashboard(request):
         bids = bids.filter(status=bid_status)
     if tender_status:
         bids = bids.filter(tender__status=tender_status)
+    else:
+        bids = bids.exclude(tender__status=Tender.Status.COMPLETED)
     bids = bids.order_by("-updated_at", "-pk")
     page = Paginator(bids, 20).get_page(request.GET.get("page"))
     pagination_params = request.GET.copy()

@@ -579,6 +579,21 @@ class ProcurementFlowTests(TestCase):
         self.assertNotContains(response, "Поставка оборудования")
         self.assertEqual(response.context["page_obj"].paginator.count, 1)
 
+    def test_customer_dashboard_hides_completed_tenders_until_status_selected(self):
+        completed = Tender.objects.create(
+            owner=self.customer, organization=self.customer.profile.organization,
+            title="Завершенная закупка", number="DONE-001", category=Tender.Category.GOODS,
+            description="Описание", delivery_address="Москва", budget=1000,
+            deadline=timezone.now() - timedelta(days=1), status=Tender.Status.COMPLETED,
+        )
+        self.client.login(username="customer", password="testpass123")
+
+        default_response = self.client.get(reverse("dashboard"))
+        completed_response = self.client.get(reverse("dashboard"), {"status": Tender.Status.COMPLETED})
+
+        self.assertNotContains(default_response, completed.title)
+        self.assertContains(completed_response, completed.title)
+
     def test_customer_dashboard_paginates_tenders(self):
         for index in range(25):
             Tender.objects.create(
@@ -610,6 +625,22 @@ class ProcurementFlowTests(TestCase):
         self.assertEqual(response.context["page_obj"].paginator.count, 20)
         self.assertEqual(len(response.context["bids"]), 20)
         self.assertNotContains(response, "Поставка оборудования")
+
+    def test_supplier_dashboard_hides_completed_tenders_until_stage_selected(self):
+        completed = Tender.objects.create(
+            owner=self.customer, organization=self.customer.profile.organization,
+            title="Завершенная процедура", number="DONE-SUP-001", category=Tender.Category.GOODS,
+            description="Описание", delivery_address="Москва", budget=1000,
+            deadline=timezone.now() - timedelta(days=1), status=Tender.Status.COMPLETED,
+        )
+        Bid.objects.create(tender=completed, supplier=self.supplier, price=900, delivery_days=2)
+        self.client.login(username="supplier", password="testpass123")
+
+        default_response = self.client.get(reverse("dashboard"))
+        completed_response = self.client.get(reverse("dashboard"), {"tender_status": Tender.Status.COMPLETED})
+
+        self.assertNotContains(default_response, completed.title)
+        self.assertContains(completed_response, completed.title)
 
     def test_tender_list_ignores_invalid_choice_filters(self):
         response = self.client.get(
