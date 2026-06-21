@@ -63,7 +63,7 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(reverse("tender_list"))
 
         self.assertContains(response, "Не готовы подать заявку?")
-        self.assertContains(response, "Бюджет:")
+        self.assertContains(response, "Бюджет закупки")
 
     def test_supplier_can_submit_bid_for_imported_tender_without_budget(self):
         self.tender.budget = 0
