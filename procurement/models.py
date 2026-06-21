@@ -109,6 +109,16 @@ class Tender(models.Model):
     )
     publish_results = models.BooleanField("Публиковать результаты", default=True)
     favorites = models.ManyToManyField(User, blank=True, related_name="favorite_tenders")
+    pending_winner = models.ForeignKey(
+        "Bid", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="pending_winner_for", verbose_name="Предварительно выбранный победитель",
+    )
+    winner_selected_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="preselected_tender_winners", verbose_name="Кем выбран победитель",
+    )
+    winner_selected_at = models.DateTimeField("Дата предварительного выбора", null=True, blank=True)
+    winner_ranking_snapshot = models.JSONField("Снимок рейтинга победителя", default=dict, blank=True)
     status = models.CharField("Статус", max_length=16, choices=Status.choices, default=Status.DRAFT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

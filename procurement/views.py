@@ -546,7 +546,8 @@ def tender_cancel(request, pk):
         messages.error(request, "Эту закупку уже нельзя отменить.")
         return redirect(tender)
     tender.status = Tender.Status.CANCELLED
-    tender.save(update_fields=["status"])
+    tender.pending_winner = None
+    tender.save(update_fields=["status", "pending_winner"])
     ProcurementProtocol.objects.create(
         tender=tender,
         kind=ProcurementProtocol.Kind.CANCELLATION,
@@ -745,56 +746,34 @@ def select_winner(request, tender_pk, bid_pk):
     if request.method != "POST":
         raise PermissionDenied
     tender = manageable_tender_or_404(request.user, tender_pk)
-    if tender.is_open:
-        messages.error(request, "Победителя можно выбрать только после окончания приема заявок.")
-        return redirect(tender)
     if tender.status not in {Tender.Status.PUBLISHED, Tender.Status.REVIEW}:
         messages.error(request, "Для этой закупки победитель уже выбран или процедура отменена.")
         return redirect(tender)
     bid = get_object_or_404(Bid, pk=bid_pk, tender=tender, status=Bid.Status.SUBMITTED)
+    tender.pending_winner = bid
+    tender.winner_selected_by = request.user
+    tender.winner_selected_at = timezone.now()
+    tender.save(update_fields=["pending_winner", "winner_selected_by", "winner_selected_at"])
     ranking = comparison_rows(tender)
     winner_ranking = next((row for row in ranking if row["bid"].pk == bid.pk), None)
-    tender.bids.update(status=Bid.Status.REJECTED)
-    bid.status = Bid.Status.WINNER
-    bid.save(update_fields=["status"])
-    tender.status = Tender.Status.COMPLETED
-    tender.save(update_fields=["status"])
-    supplier_org = bid.supplier.profile.organization
-    Contract.objects.create(
-        number=f"WB-{tender.organization_id}-{tender.pk}",
-        tender=tender,
-        winning_bid=bid,
-        customer=tender.organization,
-        supplier=supplier_org,
-        amount=bid.price,
-    )
-    ProcurementProtocol.objects.create(
-        tender=tender,
-        kind=ProcurementProtocol.Kind.RESULTS,
-        number=f"WB-RESULT-{tender.organization_id}-{tender.pk}",
-        data={
-            "winner": bid.supplier.profile.company_name,
-            "winning_price": str(bid.price),
-            "participants": tender.bids.count(),
-            "completed_at": timezone.now().isoformat(),
-            "ranking": {
-                "total_score": str(winner_ranking["score"]) if winner_ranking else None,
-                "price_score": str(winner_ranking["price_score"]) if winner_ranking else None,
-                "delivery_score": str(winner_ranking["delivery_score"]) if winner_ranking else None,
-                "warranty_score": str(winner_ranking["warranty_score"]) if winner_ranking else None,
-                "weights": {"price": 60, "delivery": 25, "warranty": 15},
-            },
-        },
-        created_by=request.user,
-    )
-    for participant in tender.bids.select_related("supplier"):
-        notify_user(participant.supplier, f"Результаты тендера {tender.number}", url=tender.get_absolute_url())
+    tender.winner_ranking_snapshot = {
+        "total_score": str(winner_ranking["score"]) if winner_ranking else None,
+        "price_score": str(winner_ranking["price_score"]) if winner_ranking else None,
+        "delivery_score": str(winner_ranking["delivery_score"]) if winner_ranking else None,
+        "warranty_score": str(winner_ranking["warranty_score"]) if winner_ranking else None,
+        "weights": {"price": 60, "delivery": 25, "warranty": 15},
+    }
+    tender.save(update_fields=["winner_ranking_snapshot"])
     audit(
-        request.user, "winner.selected", bid,
+        request.user, "winner.preselected", bid,
         ranking_score=str(winner_ranking["score"]) if winner_ranking else None,
         ranking_position=winner_ranking["rank"] if winner_ranking else None,
     )
-    messages.success(request, f"Победитель выбран: {bid.supplier.profile.company_name}.")
+    messages.success(
+        request,
+        f"Предварительно выбран поставщик: {bid.supplier.profile.company_name}. "
+        "Статусы заявок, протокол и договор будут опубликованы на следующий календарный день после дедлайна.",
+    )
     return redirect(tender)
 
 

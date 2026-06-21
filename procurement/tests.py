@@ -117,7 +117,7 @@ class ProcurementFlowTests(TestCase):
 
     def test_customer_selects_winner(self):
         bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
-        self.tender.deadline = timezone.now() - timedelta(minutes=1)
+        self.tender.deadline = timezone.now() - timedelta(days=1)
         self.tender.status = Tender.Status.REVIEW
         self.tender.save()
         self.client.login(username="customer", password="testpass123")
@@ -125,18 +125,28 @@ class ProcurementFlowTests(TestCase):
         self.assertRedirects(response, self.tender.get_absolute_url())
         bid.refresh_from_db()
         self.tender.refresh_from_db()
+        self.assertEqual(bid.status, Bid.Status.SUBMITTED)
+        self.assertEqual(self.tender.pending_winner, bid)
+        self.assertEqual(self.tender.status, Tender.Status.REVIEW)
+        self.assertFalse(Contract.objects.filter(tender=self.tender).exists())
+        from .tasks import finalize_preselected_winners
+
+        self.assertEqual(finalize_preselected_winners(), 1)
+        bid.refresh_from_db()
+        self.tender.refresh_from_db()
         self.assertEqual(bid.status, Bid.Status.WINNER)
         self.assertEqual(self.tender.status, Tender.Status.COMPLETED)
         self.assertTrue(Contract.objects.filter(tender=self.tender, winning_bid=bid).exists())
         self.assertTrue(ProcurementProtocol.objects.filter(tender=self.tender, kind=ProcurementProtocol.Kind.RESULTS).exists())
 
-    def test_customer_cannot_select_winner_before_deadline(self):
+    def test_customer_can_preselect_winner_before_deadline(self):
         bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
         self.client.login(username="customer", password="testpass123")
         response = self.client.post(reverse("select_winner", args=[self.tender.pk, bid.pk]))
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.tender.refresh_from_db()
         self.assertEqual(self.tender.status, Tender.Status.PUBLISHED)
+        self.assertEqual(self.tender.pending_winner, bid)
         self.assertFalse(Contract.objects.filter(tender=self.tender).exists())
 
     def test_closed_bids_are_visible_to_customer_while_open(self):
@@ -247,7 +257,7 @@ class ProcurementFlowTests(TestCase):
 
     def test_winner_protocol_keeps_ranking_snapshot(self):
         bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10, warranty_months=12)
-        self.tender.deadline = timezone.now() - timedelta(minutes=1)
+        self.tender.deadline = timezone.now() - timedelta(days=1)
         self.tender.status = Tender.Status.REVIEW
         self.tender.save()
         self.client.login(username="customer", password="testpass123")
@@ -255,6 +265,9 @@ class ProcurementFlowTests(TestCase):
         response = self.client.post(reverse("select_winner", args=[self.tender.pk, bid.pk]))
 
         self.assertRedirects(response, self.tender.get_absolute_url())
+        from .tasks import finalize_preselected_winners
+
+        self.assertEqual(finalize_preselected_winners(), 1)
         protocol = ProcurementProtocol.objects.get(tender=self.tender, kind=ProcurementProtocol.Kind.RESULTS)
         self.assertEqual(protocol.data["ranking"]["total_score"], "100.00")
         self.assertEqual(protocol.data["ranking"]["weights"], {"price": 60, "delivery": 25, "warranty": 15})

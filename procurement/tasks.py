@@ -1,16 +1,20 @@
 try:
     from celery import shared_task
 except ModuleNotFoundError:
-    def shared_task(func):
-        func.delay = func
-        return func
+    def shared_task(*args, **kwargs):
+        def decorator(func):
+            func.delay = func
+            return func
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return decorator(args[0])
+        return decorator
 from django.utils import timezone
 from django.conf import settings
 from django.core.mail import send_mail
 
 from .models import SupplierDocument, Tender, TenderImportRun, TenderImportSource
 from .imports import run_source_sync, sync_active_sources
-from .services import notify_user
+from .services import finalize_pending_winner, notify_user
 from .services import notification_email_body
 
 
@@ -40,6 +44,15 @@ def close_expired_tenders():
         notify_user(tender.owner, f"Прием заявок завершен: {tender.number}", url=tender.get_absolute_url())
         count += 1
     return count
+
+
+@shared_task
+def finalize_preselected_winners():
+    tender_ids = Tender.objects.filter(
+        pending_winner__isnull=False,
+        deadline__date__lt=timezone.localdate(),
+    ).values_list("pk", flat=True)
+    return sum(finalize_pending_winner(tender_id) for tender_id in tender_ids)
 
 
 @shared_task
