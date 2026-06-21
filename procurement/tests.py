@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -7,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
-    Bid, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
+    AuditEvent, Bid, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
     ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportRun, TenderImportSource,
     TenderLot, TenderTemplate,
 )
@@ -138,14 +139,14 @@ class ProcurementFlowTests(TestCase):
         self.assertEqual(self.tender.status, Tender.Status.PUBLISHED)
         self.assertFalse(Contract.objects.filter(tender=self.tender).exists())
 
-    def test_closed_bids_hidden_from_customer_while_open(self):
+    def test_closed_bids_are_visible_to_customer_while_open(self):
         Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
         self.client.login(username="customer", password="testpass123")
         response = self.client.get(self.tender.get_absolute_url())
-        self.assertContains(response, "будут доступны после завершения")
-        self.assertNotContains(response, "90000")
+        self.assertContains(response, "Предложения поставщиков")
+        self.assertContains(response, "90000")
 
-    def test_auction_hides_supplier_identity_while_showing_best_price(self):
+    def test_auction_shows_supplier_identity_to_customer(self):
         self.tender.procedure = Tender.Procedure.AUCTION
         self.tender.auction_step = 5000
         self.tender.save(update_fields=["procedure", "auction_step"])
@@ -157,8 +158,8 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(self.tender.get_absolute_url())
 
         self.assertContains(response, "90000")
-        self.assertContains(response, "без раскрытия поставщика")
-        self.assertNotContains(response, self.supplier.profile.company_name)
+        self.assertContains(response, self.supplier.profile.company_name)
+        self.assertContains(response, "Открыть сравнение")
 
     def test_auction_without_bids_shows_starting_budget(self):
         self.tender.procedure = Tender.Procedure.AUCTION
@@ -209,6 +210,53 @@ class ProcurementFlowTests(TestCase):
         })
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier, price=89999).exists())
+
+    def test_customer_can_compare_submitted_bids_with_live_ranking(self):
+        competitor = User.objects.create_user("competitor", password="testpass123")
+        competitor_org = Organization.objects.create(name="Конкурент", kind=Organization.Kind.SUPPLIER)
+        Profile.objects.create(user=competitor, company_name="Конкурент", role=Profile.Role.SUPPLIER, organization=competitor_org)
+        Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10, warranty_months=12)
+        Bid.objects.create(tender=self.tender, supplier=competitor, price=80000, delivery_days=15, warranty_months=6)
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.get(reverse("tender_comparison", args=[self.tender.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Сравнение предложений")
+        rows = response.context["rows"]
+        self.assertEqual(rows[0]["bid"].supplier, self.supplier)
+        self.assertEqual(rows[0]["score"], Decimal("93.33"))
+        self.assertEqual(rows[1]["score"], Decimal("84.17"))
+        self.assertTrue(AuditEvent.objects.filter(action="tender.comparison_opened", object_id=str(self.tender.pk)).exists())
+
+    def test_supplier_and_reviewer_cannot_open_comparison(self):
+        Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        self.client.login(username="supplier", password="testpass123")
+        self.assertEqual(self.client.get(reverse("tender_comparison", args=[self.tender.pk])).status_code, 403)
+        reviewer = User.objects.create_user("reviewer", password="testpass123")
+        Profile.objects.create(
+            user=reviewer, company_name="Заказчик", role=Profile.Role.CUSTOMER,
+            organization=self.customer.profile.organization,
+        )
+        Membership.objects.create(
+            user=reviewer, organization=self.customer.profile.organization, role=Membership.Role.REVIEWER,
+        )
+        self.client.login(username="reviewer", password="testpass123")
+        self.assertEqual(self.client.get(reverse("tender_comparison", args=[self.tender.pk])).status_code, 403)
+
+    def test_winner_protocol_keeps_ranking_snapshot(self):
+        bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10, warranty_months=12)
+        self.tender.deadline = timezone.now() - timedelta(minutes=1)
+        self.tender.status = Tender.Status.REVIEW
+        self.tender.save()
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.post(reverse("select_winner", args=[self.tender.pk, bid.pk]))
+
+        self.assertRedirects(response, self.tender.get_absolute_url())
+        protocol = ProcurementProtocol.objects.get(tender=self.tender, kind=ProcurementProtocol.Kind.RESULTS)
+        self.assertEqual(protocol.data["ranking"]["total_score"], "100.00")
+        self.assertEqual(protocol.data["ranking"]["weights"], {"price": 60, "delivery": 25, "warranty": 15})
 
     def test_unapproved_supplier_cannot_bid(self):
         application = self.supplier.profile.organization.supplier_applications.get(
@@ -336,7 +384,7 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(reverse("audit_export"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
-        self.assertEqual(response.json()["status"], "ok")
+        self.assertIn("Действие".encode(), response.content)
 
 
     def test_reviewer_cannot_create_tender(self):

@@ -37,6 +37,7 @@ urlpatterns = [
     path("tenders/<int:pk>/cancel/", views.tender_cancel, name="tender_cancel"),
     path("tenders/<int:pk>/copy/", views.tender_copy, name="tender_copy"),
     path("tenders/<int:pk>/save-template/", views.tender_save_template, name="tender_save_template"),
+    path("tenders/<int:pk>/comparison/", views.tender_comparison, name="tender_comparison"),
     path("tenders/<int:tender_pk>/external-documents/<int:document_index>/", views.external_document_redirect, name="external_document_redirect"),
     path("tenders/<int:pk>/", views.tender_detail, name="tender_detail"),
     path("tenders/<int:pk>/bid/", views.bid_submit, name="bid_submit"),

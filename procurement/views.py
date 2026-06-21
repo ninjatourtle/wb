@@ -1,4 +1,5 @@
 import csv
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 from pathlib import Path
 from functools import wraps
@@ -127,6 +128,56 @@ def supplier_application_for_tender(user, tender):
     ).first()
 
 
+def comparison_rows(tender):
+    """Build a live recommendation from submitted offers without persisting scores."""
+    bids = list(
+        tender.bids.all()
+        .select_related("supplier__profile")
+        .prefetch_related("lot_offers__lot")
+        .order_by("submitted_at", "pk")
+    )
+    if not bids:
+        return []
+
+    best_price = min(bid.price for bid in bids)
+    shortest_delivery = min(bid.delivery_days for bid in bids)
+    longest_warranty = max(bid.warranty_months for bid in bids)
+    rows = []
+    for bid in bids:
+        price_score = Decimal("60") if bid.price == best_price else (
+            (best_price / bid.price * Decimal("60")) if bid.price else Decimal("0")
+        )
+        delivery_score = Decimal("25") if bid.delivery_days == shortest_delivery else (
+            Decimal(shortest_delivery) / Decimal(bid.delivery_days) * Decimal("25")
+        )
+        warranty_score = (
+            Decimal(bid.warranty_months) / Decimal(longest_warranty) * Decimal("15")
+            if longest_warranty else Decimal("0")
+        )
+        score = (price_score + delivery_score + warranty_score).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        rows.append({
+            "bid": bid,
+            "price_score": price_score.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "delivery_score": delivery_score.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "warranty_score": warranty_score.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "score": score,
+            "is_best_price": bid.price == best_price,
+            "is_fastest_delivery": bid.delivery_days == shortest_delivery,
+            "is_best_warranty": bool(longest_warranty and bid.warranty_months == longest_warranty),
+        })
+    rows.sort(key=lambda row: row["score"], reverse=True)
+    previous_score = None
+    rank = 0
+    for index, row in enumerate(rows, start=1):
+        if row["score"] != previous_score:
+            rank = index
+            previous_score = row["score"]
+        row["rank"] = rank
+    return rows
+
+
 def home(request):
     open_tenders = Tender.objects.filter(
         status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
@@ -223,7 +274,8 @@ def tender_detail(request, pk):
     if tender.status in {Tender.Status.DRAFT, Tender.Status.APPROVAL} and not can_review:
         raise Http404
     own_bid = Bid.objects.filter(tender=tender, supplier=request.user).first() if profile and profile.role == Profile.Role.SUPPLIER else None
-    can_see_bids = can_review and not tender.is_open
+    can_see_bids = can_manage and tender.bids.exists()
+    ranking = comparison_rows(tender) if can_manage else []
     best_price = tender.best_price if tender.procedure == Tender.Procedure.AUCTION else None
     imported_data = tender.import_record.raw_data if hasattr(tender, "import_record") else {}
     details = imported_data.get("details", {})
@@ -240,6 +292,8 @@ def tender_detail(request, pk):
     return render(request, "procurement/tender_detail.html", {
         "tender": tender, "own_bid": own_bid,
         "bids": tender.bids.select_related("supplier__profile") if can_see_bids else [],
+        "comparison_summary": ranking[0] if ranking else None,
+        "submitted_bid_count": tender.bids.filter(status=Bid.Status.SUBMITTED).count(),
         "is_owner": can_manage, "can_review": can_review, "can_see_bids": can_see_bids, "best_price": best_price,
         "question_form": QuestionForm(), "document_form": TenderDocumentForm(), "lot_form": TenderLotForm(),
         "is_favorite": request.user.is_authenticated and tender.favorites.filter(pk=request.user.pk).exists(),
@@ -249,6 +303,38 @@ def tender_detail(request, pk):
         "external_parameters": details.get("parameters", {}),
         "external_rules": details.get("rules", []),
         "position_specification": position_specification,
+    })
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+def tender_comparison(request, pk):
+    tender = manageable_tender_or_404(request.user, pk)
+    rows = comparison_rows(tender)
+    status = request.GET.get("status", "")
+    lots = request.GET.get("lots", "")
+    score_from = request.GET.get("score_from", "").strip()
+    if status not in Bid.Status.values:
+        status = ""
+    if status:
+        rows = [row for row in rows if row["bid"].status == status]
+    if lots == "yes":
+        rows = [row for row in rows if row["bid"].lot_offers.exists()]
+    elif lots == "no":
+        rows = [row for row in rows if not row["bid"].lot_offers.exists()]
+    if score_from:
+        try:
+            minimum_score = Decimal(score_from)
+            rows = [row for row in rows if row["score"] >= minimum_score]
+        except Exception:
+            score_from = ""
+    audit(request.user, "tender.comparison_opened", tender, bid_count=len(rows))
+    return render(request, "procurement/tender_comparison.html", {
+        "tender": tender,
+        "rows": rows,
+        "status": status,
+        "lots": lots,
+        "score_from": score_from,
+        "bid_statuses": Bid.Status.choices,
     })
 
 
@@ -656,6 +742,8 @@ def select_winner(request, tender_pk, bid_pk):
         messages.error(request, "Для этой закупки победитель уже выбран или процедура отменена.")
         return redirect(tender)
     bid = get_object_or_404(Bid, pk=bid_pk, tender=tender, status=Bid.Status.SUBMITTED)
+    ranking = comparison_rows(tender)
+    winner_ranking = next((row for row in ranking if row["bid"].pk == bid.pk), None)
     tender.bids.update(status=Bid.Status.REJECTED)
     bid.status = Bid.Status.WINNER
     bid.save(update_fields=["status"])
@@ -679,12 +767,23 @@ def select_winner(request, tender_pk, bid_pk):
             "winning_price": str(bid.price),
             "participants": tender.bids.count(),
             "completed_at": timezone.now().isoformat(),
+            "ranking": {
+                "total_score": str(winner_ranking["score"]) if winner_ranking else None,
+                "price_score": str(winner_ranking["price_score"]) if winner_ranking else None,
+                "delivery_score": str(winner_ranking["delivery_score"]) if winner_ranking else None,
+                "warranty_score": str(winner_ranking["warranty_score"]) if winner_ranking else None,
+                "weights": {"price": 60, "delivery": 25, "warranty": 15},
+            },
         },
         created_by=request.user,
     )
     for participant in tender.bids.select_related("supplier"):
         notify_user(participant.supplier, f"Результаты тендера {tender.number}", url=tender.get_absolute_url())
-    audit(request.user, "winner.selected", bid)
+    audit(
+        request.user, "winner.selected", bid,
+        ranking_score=str(winner_ranking["score"]) if winner_ranking else None,
+        ranking_position=winner_ranking["rank"] if winner_ranking else None,
+    )
     messages.success(request, f"Победитель выбран: {bid.supplier.profile.company_name}.")
     return redirect(tender)
 
