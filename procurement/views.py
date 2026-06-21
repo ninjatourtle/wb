@@ -310,6 +310,12 @@ def tender_detail(request, pk):
 def tender_comparison(request, pk):
     tender = manageable_tender_or_404(request.user, pk)
     rows = comparison_rows(tender)
+    applications = {
+        application.organization_id: application.pk
+        for application in SupplierApplication.objects.filter(customer=tender.organization)
+    }
+    for row in rows:
+        row["supplier_application_id"] = applications.get(row["bid"].supplier.profile.organization_id)
     status = request.GET.get("status", "")
     lots = request.GET.get("lots", "")
     score_from = request.GET.get("score_from", "").strip()

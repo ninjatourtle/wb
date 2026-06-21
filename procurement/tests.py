@@ -227,6 +227,7 @@ class ProcurementFlowTests(TestCase):
         self.assertEqual(rows[0]["bid"].supplier, self.supplier)
         self.assertEqual(rows[0]["score"], Decimal("93.33"))
         self.assertEqual(rows[1]["score"], Decimal("84.17"))
+        self.assertEqual(rows[0]["supplier_application_id"], self.supplier.profile.organization.supplier_applications.get(customer=self.tender.organization).pk)
         self.assertTrue(AuditEvent.objects.filter(action="tender.comparison_opened", object_id=str(self.tender.pk)).exists())
 
     def test_supplier_and_reviewer_cannot_open_comparison(self):
