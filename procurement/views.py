@@ -122,9 +122,12 @@ def supplier_application_for_tender(user, tender):
 
 
 def home(request):
-    tenders = Tender.objects.filter(
+    open_tenders = Tender.objects.filter(
         status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
-    ).select_related("owner__profile", "organization").annotate(bid_count=Count("bids")).order_by("deadline")[:6]
+    )
+    tenders = open_tenders.select_related("owner__profile", "organization").annotate(
+        bid_count=Count("bids")
+    ).order_by("deadline")[:6]
     completed_tenders = Tender.objects.filter(status=Tender.Status.COMPLETED).annotate(
         winner_price=Min("bids__price", filter=Q(bids__status=Bid.Status.WINNER))
     )
@@ -134,12 +137,19 @@ def home(request):
         if tender.winner_price is not None
     )
     stats = {
-        "open": Tender.objects.filter(status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()).count(),
+        "open": open_tenders.count(),
         "suppliers": SupplierApplication.objects.filter(status=SupplierApplication.Status.APPROVED).count(),
         "completed": completed_tenders.count(),
         "savings": savings,
     }
-    return render(request, "procurement/home.html", {"tenders": tenders, "stats": stats})
+    category_labels = dict(Tender.Category.choices)
+    category_stats = [
+        {"value": row["category"], "label": category_labels[row["category"]], "count": row["count"]}
+        for row in open_tenders.values("category").annotate(count=Count("pk")).order_by("-count")
+    ]
+    return render(request, "procurement/home.html", {
+        "tenders": tenders, "stats": stats, "category_stats": category_stats,
+    })
 
 
 def register(request):

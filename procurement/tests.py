@@ -51,6 +51,20 @@ class ProcurementFlowTests(TestCase):
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
 
+    def test_home_marketing_page_shows_category_entry_points(self):
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "Закупки под ваш профиль")
+        self.assertContains(response, self.tender.get_category_display())
+        self.assertContains(response, "Ответы на частые вопросы")
+        self.assertContains(response, "Регистрация открывает кабинет поставщика")
+
+    def test_catalog_explains_next_step_for_new_supplier(self):
+        response = self.client.get(reverse("tender_list"))
+
+        self.assertContains(response, "Не готовы подать заявку?")
+        self.assertContains(response, "Подача онлайн")
+
     def test_supplier_can_submit_bid_for_imported_tender_without_budget(self):
         self.tender.budget = 0
         self.tender.save(update_fields=["budget"])
