@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.conf import settings
 from django.core.mail import send_mail
 
-from .models import Tender, TenderImportRun, TenderImportSource
+from .models import SupplierDocument, Tender, TenderImportRun, TenderImportSource
 from .imports import run_source_sync, sync_active_sources
 from .services import notify_user
 from .services import notification_email_body
@@ -53,3 +53,31 @@ def sync_external_tender_source(source_id, run_id):
     run = TenderImportRun.objects.get(pk=run_id, source=source)
     run_source_sync(source, run=run)
     return run.result or {"error": run.error}
+
+
+@shared_task
+def check_expiring_supplier_documents():
+    """Notify suppliers before a licensing or registration document becomes invalid."""
+    from datetime import timedelta
+
+    deadline = timezone.localdate() + timedelta(days=30)
+    documents = SupplierDocument.objects.filter(
+        expires_at__isnull=False,
+        expires_at__lte=deadline,
+        expiry_notice_sent_at__isnull=True,
+    ).select_related("organization")
+    notified = 0
+    for document in documents:
+        users = document.organization.profiles.select_related("user")
+        state = "истек" if document.expires_at < timezone.localdate() else "истекает"
+        for profile in users:
+            notify_user(
+                profile.user,
+                f"Срок документа {state}: {document.title}",
+                f"Документ компании «{document.organization.name}» действует до {document.expires_at:%d.%m.%Y}.",
+                "/company/",
+            )
+            notified += 1
+        document.expiry_notice_sent_at = timezone.now()
+        document.save(update_fields=["expiry_notice_sent_at"])
+    return notified

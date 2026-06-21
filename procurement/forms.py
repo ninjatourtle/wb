@@ -205,7 +205,8 @@ class OrganizationForm(forms.ModelForm):
 class SupplierDocumentForm(forms.ModelForm):
     class Meta:
         model = SupplierDocument
-        fields = ("kind", "title", "file")
+        fields = ("kind", "title", "file", "expires_at")
+        widgets = {"expires_at": forms.DateInput(attrs={"type": "date"})}
 
     def clean_file(self):
         return validate_document(self.cleaned_data["file"])

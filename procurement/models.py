@@ -396,6 +396,26 @@ class SupplierDocument(models.Model):
     file = models.FileField("Файл", upload_to="suppliers/%Y/%m/")
     uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateField("Срок действия", null=True, blank=True)
+    expiry_notice_sent_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at < timezone.localdate())
+
+
+class LoginEvent(models.Model):
+    """Authentication events retained for incident investigation and access reviews."""
+
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="login_events")
+    username = models.CharField(max_length=150, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+    success = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class Question(models.Model):

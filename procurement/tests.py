@@ -7,7 +7,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
-    Bid, Contract, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
+    Bid, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
     ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportRun, TenderImportSource,
     TenderLot, TenderTemplate,
 )
@@ -314,6 +314,28 @@ class ProcurementFlowTests(TestCase):
     def test_health_endpoint_checks_database(self):
         response = self.client.get(reverse("health"))
         self.assertEqual(response.status_code, 200)
+
+    def test_login_events_record_success_and_failure(self):
+        failed = self.client.post(reverse("login"), {"username": "customer", "password": "wrong"})
+        self.assertEqual(failed.status_code, 200)
+        self.assertTrue(LoginEvent.objects.filter(username="customer", success=False).exists())
+        self.client.post(reverse("login"), {"username": "customer", "password": "testpass123"})
+        self.assertTrue(LoginEvent.objects.filter(user=self.customer, success=True).exists())
+
+    def test_operations_dashboard_is_staff_only(self):
+        self.client.login(username="customer", password="testpass123")
+        self.assertEqual(self.client.get(reverse("operations_dashboard")).status_code, 403)
+        self.customer.is_staff = True
+        self.customer.save(update_fields=["is_staff"])
+        response = self.client.get(reverse("operations_dashboard"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Операционный мониторинг")
+
+    def test_audit_can_be_exported_as_csv(self):
+        self.client.login(username="customer", password="testpass123")
+        response = self.client.get(reverse("audit_export"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
         self.assertEqual(response.json()["status"], "ok")
 
 

@@ -1,6 +1,8 @@
 from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.models import User
 from .models import (
-    AuditEvent, Bid, BidLot, Contract, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
+    AuditEvent, Bid, BidLot, Contract, LoginEvent, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
     ImportedTender, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
     TenderImportRun, TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot,
 )
@@ -15,6 +17,7 @@ ADMIN_MODEL_NAMES = {
     BidLot: ("предложение по лоту", "предложения по лотам"),
     Contract: ("договор", "договоры"),
     ImportedTender: ("импортированная закупка", "импортированные закупки"),
+    LoginEvent: ("событие входа", "история входов"),
     Membership: ("сотрудник организации", "сотрудники организаций"),
     Notification: ("уведомление", "уведомления"),
     Organization: ("организация", "организации"),
@@ -43,6 +46,25 @@ class BaseAdmin(admin.ModelAdmin):
     list_max_show_all = 200
     show_full_result_count = False
     save_on_top = True
+
+
+admin.site.unregister(User)
+
+
+@admin.register(User)
+class PlatformUserAdmin(UserAdmin):
+    list_display = ("username", "email", "first_name", "last_name", "is_active", "is_staff", "last_login")
+    list_filter = ("is_active", "is_staff", "is_superuser")
+    search_fields = ("username", "email", "first_name", "last_name")
+    actions = ("block_users", "unblock_users")
+
+    @admin.action(description="Заблокировать выбранные учетные записи")
+    def block_users(self, request, queryset):
+        queryset.exclude(pk=request.user.pk).update(is_active=False)
+
+    @admin.action(description="Разблокировать выбранные учетные записи")
+    def unblock_users(self, request, queryset):
+        queryset.update(is_active=True)
 
 
 class TenderLotInline(admin.TabularInline):
@@ -176,8 +198,8 @@ class TenderDocumentAdmin(BaseAdmin):
 
 @admin.register(SupplierDocument)
 class SupplierDocumentAdmin(BaseAdmin):
-    list_display = ("title", "organization", "kind", "uploaded_by", "uploaded_at")
-    list_filter = ("kind", "uploaded_at")
+    list_display = ("title", "organization", "kind", "expires_at", "uploaded_by", "uploaded_at")
+    list_filter = ("kind", "expires_at", "uploaded_at")
     search_fields = ("title", "organization__name", "organization__inn")
     list_select_related = ("organization", "uploaded_by")
 
@@ -231,4 +253,13 @@ class AuditEventAdmin(BaseAdmin):
     list_filter = ("action", "object_type", "organization", "created_at")
     search_fields = ("action", "object_type", "object_id", "user__username", "organization__name")
     readonly_fields = ("user", "organization", "action", "object_type", "object_id", "details", "created_at")
+    date_hierarchy = "created_at"
+
+
+@admin.register(LoginEvent)
+class LoginEventAdmin(BaseAdmin):
+    list_display = ("created_at", "username", "user", "ip_address", "success")
+    list_filter = ("success", "created_at")
+    search_fields = ("username", "user__username", "ip_address")
+    readonly_fields = ("user", "username", "ip_address", "user_agent", "success", "created_at")
     date_hierarchy = "created_at"

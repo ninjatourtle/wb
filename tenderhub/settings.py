@@ -138,7 +138,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "procurement.tasks.sync_external_tenders",
         "schedule": 3600.0,
     },
+    "check-expiring-supplier-documents-daily": {
+        "task": "procurement.tasks.check_expiring_supplier_documents",
+        "schedule": 86400.0,
+    },
 }
+
+BACKUP_STATUS_FILE = os.getenv("BACKUP_STATUS_FILE", "/backups/last-success.txt")
 
 DATABASES["default"]["CONN_MAX_AGE"] = int(os.getenv("DB_CONN_MAX_AGE", "60"))
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

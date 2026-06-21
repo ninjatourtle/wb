@@ -1,4 +1,6 @@
+import csv
 from datetime import timedelta
+from pathlib import Path
 from functools import wraps
 from urllib.parse import urlparse
 
@@ -8,7 +10,10 @@ from django.contrib.auth.models import User
 from django.contrib.auth.forms import PasswordResetForm
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
+from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
+from django.db import connection
 from django.db.models import Count, Min, Q, Sum
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.core.paginator import Paginator
@@ -22,7 +27,7 @@ from .forms import (
     TenderForm, TenderLotForm, TenderTemplateForm, bid_lot_formset,
 )
 from .models import (
-    AuditEvent, Bid, BidLot, Contract, Membership, Organization, ProcurementProtocol, Profile,
+    AuditEvent, Bid, BidLot, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile,
     Question, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
     TenderImportRun, TenderImportSource, TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderLot,
 )
@@ -315,6 +320,15 @@ def dashboard(request):
         ).select_related("source", "source__organization", "requested_by")
         if organization:
             import_runs = import_runs.filter(source__organization=organization)
+        expiring_documents = SupplierDocument.objects.filter(
+            organization__supplier_applications__customer__in=organizations,
+            expires_at__isnull=False,
+            expires_at__lte=timezone.localdate() + timedelta(days=30),
+        ).select_related("organization").order_by("expires_at").distinct()
+        if organization:
+            expiring_documents = expiring_documents.filter(
+                organization__supplier_applications__customer=organization
+            )
         return render(request, "procurement/dashboard_customer.html", {
             "tenders": page, "page_obj": page, "pending_applications": pending, "notifications": notifications,
             "total_tenders": organization_tenders.count(),
@@ -340,6 +354,10 @@ def dashboard(request):
                 request.user, [Membership.Role.OWNER, Membership.Role.REVIEWER]
             ).exists(),
             "import_sources": import_sources, "import_runs": import_runs[:8],
+            "expiring_documents": expiring_documents[:5],
+            "unanswered_questions": Question.objects.filter(
+                tender__organization__in=organizations, answer="", created_at__lte=timezone.now() - timedelta(hours=24)
+            ).count(),
             "manageable_import_source_ids": set(TenderImportSource.objects.filter(
                 organization__in=accessible_customer_organizations(
                     request.user, [Membership.Role.OWNER, Membership.Role.MANAGER]
@@ -975,8 +993,6 @@ def protocol_detail(request, protocol_pk):
 
 @membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER, Membership.Role.REVIEWER)
 def tender_export(request):
-    import csv
-
     response = HttpResponse(content_type="text/csv; charset=utf-8")
     response["Content-Disposition"] = 'attachment; filename="wildberries-tenders.csv"'
     response.write("\ufeff")
@@ -989,6 +1005,34 @@ def tender_export(request):
         tenders = tenders.filter(organization=organization)
     for tender in tenders:
         writer.writerow([tender.organization.name, tender.number, tender.title, tender.get_status_display(), tender.get_procedure_display(), tender.budget, tender.deadline, tender.bid_count])
+    return response
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER, Membership.Role.REVIEWER)
+def audit_export(request):
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="tenderflow-audit.csv"'
+    response.write("\ufeff")
+    writer = csv.writer(response)
+    writer.writerow(["Время", "Юридическое лицо", "Пользователь", "Действие", "Объект", "Детали"])
+    organizations = accessible_customer_organizations(request.user)
+    organization = selected_organization(request, organizations)
+    events = AuditEvent.objects.filter(organization__in=organizations).select_related("user", "organization")
+    if organization:
+        events = events.filter(organization=organization)
+    action = request.GET.get("action", "").strip()
+    if action:
+        events = events.filter(action__icontains=action)
+    for event in events.iterator():
+        writer.writerow([
+            event.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            event.organization.name if event.organization else "",
+            event.user.get_username() if event.user else "Система",
+            event.action,
+            f"{event.object_type} #{event.object_id}",
+            event.details,
+        ])
+    audit(request.user, "audit.exported", organization=organization)
     return response
 
 
@@ -1009,6 +1053,42 @@ def audit_registry(request):
         "events": page, "page_obj": page, "action": action,
         "organizations": organizations, "organization": organization,
         "pagination_query": pagination_params.urlencode(),
+    })
+
+
+@login_required
+def operations_dashboard(request):
+    if not request.user.is_staff:
+        raise PermissionDenied
+    checks = []
+    try:
+        connection.ensure_connection()
+        checks.append(("База данных", True, "Подключение PostgreSQL установлено."))
+    except Exception:
+        checks.append(("База данных", False, "Не удалось подключиться к базе данных."))
+    try:
+        cache.set("operations-health-check", "ok", 10)
+        checks.append(("Redis cache", cache.get("operations-health-check") == "ok", "Кэш и блокировки доступны."))
+    except Exception:
+        checks.append(("Redis cache", False, "Кэш недоступен."))
+    smtp_ready = bool(settings.EMAIL_HOST and settings.EMAIL_NOTIFICATIONS_ENABLED)
+    checks.append(("Email", smtp_ready, "Уведомления включены." if smtp_ready else "Email-уведомления выключены или SMTP не настроен."))
+    try:
+        backup_file = Path(settings.BACKUP_STATUS_FILE)
+        backup_time = backup_file.read_text(encoding="utf-8").strip() if backup_file.exists() else ""
+        checks.append(("Резервная копия", bool(backup_time), backup_time or "Файл последней успешной копии не найден."))
+    except OSError:
+        checks.append(("Резервная копия", False, "Статус резервного копирования недоступен."))
+    since = timezone.now() - timedelta(hours=24)
+    failed_imports = TenderImportRun.objects.filter(
+        created_at__gte=since, status__in=[TenderImportRun.Status.FAILED, TenderImportRun.Status.PARTIAL]
+    ).count()
+    recent_logins = LoginEvent.objects.select_related("user").all()[:20]
+    return render(request, "procurement/operations_dashboard.html", {
+        "checks": checks,
+        "failed_imports": failed_imports,
+        "unread_notifications": request.user.notifications.filter(is_read=False).count(),
+        "recent_logins": recent_logins,
     })
 
 
