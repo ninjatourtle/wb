@@ -46,6 +46,8 @@ services:
     env_file: .env
     command: sh -c "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn tenderhub.wsgi:application --bind 0.0.0.0:8000 --workers 3"
     volumes: [static_data:/app/staticfiles]
+    extra_hosts:
+      - "host.docker.internal:${POSTFIX_RELAY_HOST_IP:-172.18.0.1}"
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -61,6 +63,8 @@ services:
     build: .
     env_file: .env
     command: celery -A tenderhub worker -l info
+    extra_hosts:
+      - "host.docker.internal:${POSTFIX_RELAY_HOST_IP:-172.18.0.1}"
     depends_on:
       web: {condition: service_healthy}
       redis: {condition: service_healthy}

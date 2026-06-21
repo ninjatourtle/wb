@@ -14,8 +14,10 @@ class Command(BaseCommand):
             raise CommandError("EMAIL_NOTIFICATIONS_ENABLED=0")
         if settings.EMAIL_BACKEND != "django.core.mail.backends.smtp.EmailBackend":
             raise CommandError("Для production требуется SMTP backend")
-        if not all((settings.EMAIL_HOST, settings.EMAIL_HOST_USER, settings.EMAIL_HOST_PASSWORD)):
-            raise CommandError("Не заполнены EMAIL_HOST, EMAIL_HOST_USER или EMAIL_HOST_PASSWORD")
+        if not settings.EMAIL_HOST:
+            raise CommandError("Не заполнен EMAIL_HOST")
+        if settings.EMAIL_PORT != 25 and not all((settings.EMAIL_HOST_USER, settings.EMAIL_HOST_PASSWORD)):
+            raise CommandError("Для SMTP на порту, отличном от 25, нужны EMAIL_HOST_USER и EMAIL_HOST_PASSWORD")
 
         connection = get_connection()
         connection.open()
