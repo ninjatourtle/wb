@@ -63,7 +63,7 @@ class ProcurementFlowTests(TestCase):
         response = self.client.get(reverse("tender_list"))
 
         self.assertContains(response, "Не готовы подать заявку?")
-        self.assertContains(response, "Подача онлайн")
+        self.assertContains(response, "Бюджет:")
 
     def test_supplier_can_submit_bid_for_imported_tender_without_budget(self):
         self.tender.budget = 0
@@ -903,6 +903,55 @@ class TenderImportTests(TestCase):
 
         tender.refresh_from_db()
         self.assertEqual(tender.budget, 750000)
+
+    @patch("procurement.imports.randint", return_value=100)
+    @patch("procurement.imports.fetch_bidzaar_details")
+    def test_bidzaar_missing_expected_price_gets_fallback_budget(
+        self, fetch_bidzaar_details, randint
+    ):
+        self.source.adapter = TenderImportSource.Adapter.BIDZAAR
+        self.source.save(update_fields=["adapter"])
+        fetch_bidzaar_details.return_value = {
+            "main": {"generalInformation": {}},
+            "parameters": {},
+            "criteria": [],
+            "groups": [{"params": {}}],
+            "positions": [],
+        }
+
+        from procurement.imports import enrich_bidzaar_item
+
+        enriched = enrich_bidzaar_item({**self.item, "requirements": ""})
+
+        self.assertEqual(enriched["budget"], "1000000")
+        randint.assert_called_once_with(100, 2500)
+
+    @patch("procurement.imports.randint", return_value=125)
+    def test_bidzaar_cached_zero_budget_gets_fallback_budget(self, randint):
+        item = {
+            "_listing_hash": "same",
+            "budget": "0",
+            "description": "Описание",
+            "requirements": "",
+            "delivery_address": "Москва",
+            "procedure": Tender.Procedure.CLOSED,
+        }
+        existing = {
+            "_listing_hash": "same",
+            "budget": "0",
+            "description": "Описание",
+            "requirements": "",
+            "delivery_address": "Москва",
+            "procedure": Tender.Procedure.CLOSED,
+            "details": {"schema_version": 2},
+        }
+
+        from procurement.imports import enrich_bidzaar_item
+
+        enriched = enrich_bidzaar_item(item, existing)
+
+        self.assertEqual(enriched["budget"], "1250000")
+        randint.assert_called_once_with(100, 2500)
 
     @patch("procurement.imports.fetch_source_items")
     def test_missing_tender_is_cancelled_only_when_enabled(self, fetch_source_items):

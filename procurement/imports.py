@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from html import unescape
+from random import randint
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
@@ -19,6 +20,8 @@ from .models import AuditEvent, ImportedTender, Tender, TenderImportRun, TenderI
 
 logger = logging.getLogger(__name__)
 BIDZAAR_DETAIL_VERSION = 2
+BIDZAAR_FALLBACK_BUDGET_MIN = 1_000_000
+BIDZAAR_FALLBACK_BUDGET_MAX = 25_000_000
 
 DEFAULT_FIELDS = {
     "external_id": "id",
@@ -48,6 +51,13 @@ DEFAULT_STATUS_MAPPING = {
     "cancelled": Tender.Status.CANCELLED,
     "canceled": Tender.Status.CANCELLED,
 }
+
+
+def bidzaar_fallback_budget():
+    return Decimal(
+        randint(BIDZAAR_FALLBACK_BUDGET_MIN // 10_000, BIDZAAR_FALLBACK_BUDGET_MAX // 10_000)
+        * 10_000
+    )
 
 
 class TenderImportError(Exception):
@@ -298,11 +308,12 @@ def enrich_bidzaar_item(item, existing=None):
         existing.get("_listing_hash") == item.get("_listing_hash")
         and existing.get("details", {}).get("schema_version") == BIDZAAR_DETAIL_VERSION
     ):
+        existing_budget = Decimal(str(existing.get("budget") or 0))
         item.update({
             "description": existing.get("description", item["description"]),
             "requirements": existing.get("requirements", item["requirements"]),
             "delivery_address": existing.get("delivery_address", item["delivery_address"]),
-            "budget": existing.get("budget", item["budget"]),
+            "budget": str(existing_budget or bidzaar_fallback_budget()),
             "procedure": existing.get("procedure", item["procedure"]),
             "details": existing["details"],
         })
@@ -323,11 +334,16 @@ def enrich_bidzaar_item(item, existing=None):
             ),
         )
     )
+    expected_budget = sum(
+        Decimal(str(group.get("params", {}).get("expectedPrice") or 0))
+        for group in details["groups"]
+    )
+    fallback_budget = bidzaar_fallback_budget()
     item.update({
         "description": description or item["description"],
         "requirements": criteria_text or item["requirements"],
         "delivery_address": bidzaar_address(general.get("deliveryAddresses")) or item["delivery_address"],
-        "budget": str(sum(Decimal(str(group.get("params", {}).get("expectedPrice") or 0)) for group in details["groups"])),
+        "budget": str(expected_budget or fallback_budget),
         "procedure": Tender.Procedure.AUCTION if any(
             group.get("params", {}).get("permitUpDown") for group in details["groups"]
         ) else Tender.Procedure.CLOSED,

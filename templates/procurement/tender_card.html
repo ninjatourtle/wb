@@ -3,6 +3,6 @@
   <h3>{{ tender.title }}</h3>
   <p>{{ tender.description|truncatewords:24 }}</p>
   <div class="card-meta"><span><small>Формат</small>{{ tender.get_procedure_display }}</span><span><small>Место поставки</small>{{ tender.delivery_address|truncatechars:34 }}</span></div>
-  <div class="card-signals"><span>Подача онлайн</span><span>{% if tender.lots.exists %}{{ tender.lots.count }} лотов{% else %}Условия опубликованы{% endif %}</span></div>
+  <div class="card-signals"><span>Бюджет: {{ tender.budget|floatformat:0 }} ₽</span></div>
   <div class="card-bottom"><span>{{ tender.get_category_display }}</span><b>До {{ tender.deadline|date:"d.m.Y H:i" }} →</b></div>
 </a>
