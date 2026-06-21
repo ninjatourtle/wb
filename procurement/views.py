@@ -170,7 +170,7 @@ def register(request):
 def tender_list(request):
     tenders = Tender.objects.filter(
         status=Tender.Status.PUBLISHED, deadline__gt=timezone.now()
-    ).select_related("owner__profile", "organization")
+    ).select_related("owner__profile", "organization", "import_record")
     query, category = request.GET.get("q", "").strip(), request.GET.get("category", "")
     procedure, price_to = request.GET.get("procedure", ""), request.GET.get("price_to", "")
     source = request.GET.get("source", "")

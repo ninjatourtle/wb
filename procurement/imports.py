@@ -314,6 +314,7 @@ def enrich_bidzaar_item(item, existing=None):
             "requirements": existing.get("requirements", item["requirements"]),
             "delivery_address": existing.get("delivery_address", item["delivery_address"]),
             "budget": str(existing_budget or bidzaar_fallback_budget()),
+            "budget_is_estimated": not bool(existing_budget) or bool(existing.get("budget_is_estimated")),
             "procedure": existing.get("procedure", item["procedure"]),
             "details": existing["details"],
         })
@@ -344,6 +345,7 @@ def enrich_bidzaar_item(item, existing=None):
         "requirements": criteria_text or item["requirements"],
         "delivery_address": bidzaar_address(general.get("deliveryAddresses")) or item["delivery_address"],
         "budget": str(expected_budget or fallback_budget),
+        "budget_is_estimated": not bool(expected_budget),
         "procedure": Tender.Procedure.AUCTION if any(
             group.get("params", {}).get("permitUpDown") for group in details["groups"]
         ) else Tender.Procedure.CLOSED,

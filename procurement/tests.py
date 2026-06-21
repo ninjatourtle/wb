@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -13,6 +13,7 @@ from .models import (
 )
 from .forms import TenderDocumentForm, TenderForm
 from .imports import fetch_bidzaar_items, run_source_sync, sync_source
+from .services import notification_email_body
 
 
 class ProcurementFlowTests(TestCase):
@@ -169,6 +170,26 @@ class ProcurementFlowTests(TestCase):
         self.assertContains(response, "Пока нет предложений")
         self.assertContains(response, "Стартовый бюджет")
         self.assertContains(response, "100000")
+
+    def test_estimated_budget_is_labeled_in_tender_card(self):
+        source = TenderImportSource.objects.create(
+            name="Estimated budget source", url="https://example.test/tenders",
+            organization=self.customer.profile.organization, owner=self.customer,
+        )
+        ImportedTender.objects.create(
+            source=source, external_id="estimated-budget", tender=self.tender,
+            raw_data={"budget_is_estimated": True},
+        )
+
+        response = self.client.get(reverse("tender_list"))
+
+        self.assertContains(response, "Ориентировочная сумма")
+
+    @override_settings(SITE_URL="https://wb-tender.ru")
+    def test_notification_email_contains_absolute_url(self):
+        body = notification_email_body("Новое уведомление", "/tenders/42/")
+
+        self.assertIn("https://wb-tender.ru/tenders/42/", body)
 
     def test_auction_bid_must_beat_best_price(self):
         self.tender.procedure = Tender.Procedure.AUCTION

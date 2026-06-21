@@ -101,14 +101,23 @@ if os.getenv("AWS_STORAGE_BUCKET_NAME"):
     AWS_DEFAULT_ACL = None
     AWS_QUERYSTRING_AUTH = True
 
-EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "WB Tender <noreply@wildberries.ru>")
+SITE_URL = os.getenv("SITE_URL", "http://localhost:8000").rstrip("/")
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.console.EmailBackend" if DEBUG else "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_NOTIFICATIONS_ENABLED = os.getenv("EMAIL_NOTIFICATIONS_ENABLED", "0") == "1"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "WB Tender <noreply@wb-tender.ru>")
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "1") == "1"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "0") == "1"
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+if EMAIL_USE_TLS and EMAIL_USE_SSL:
+    raise RuntimeError("EMAIL_USE_TLS and EMAIL_USE_SSL cannot both be enabled")
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/1")

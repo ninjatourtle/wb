@@ -10,7 +10,7 @@
     <span><small>Место поставки</small>{{ tender.delivery_address|truncatechars:34 }}</span>
   </div>
   <div class="card-budget">
-    <div><span>Бюджет закупки</span><small>Начальная цена</small></div>
+    <div><span>Бюджет закупки</span><small>{% if tender.budget_is_estimated %}Ориентировочная сумма{% else %}Начальная цена{% endif %}</small></div>
     <strong>{{ tender.budget|floatformat:0 }} ₽</strong>
   </div>
   <div class="card-bottom">

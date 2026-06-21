@@ -133,6 +133,13 @@ class Tender(models.Model):
     def best_price(self):
         return self.bids.aggregate(models.Min("price"))["price__min"]
 
+    @property
+    def budget_is_estimated(self):
+        try:
+            return bool(self.import_record.raw_data.get("budget_is_estimated"))
+        except ImportedTender.DoesNotExist:
+            return False
+
     def user_can_manage(self, user):
         if not user.is_authenticated or not self.organization_id:
             return self.owner_id == user.id
