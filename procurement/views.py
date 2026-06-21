@@ -384,7 +384,7 @@ def dashboard(request):
             tenders = tenders.filter(import_record__isnull=False)
         elif source == "local":
             tenders = tenders.filter(import_record__isnull=True)
-        tenders = tenders.annotate(
+        tenders = tenders.select_related("pending_winner__supplier__profile").annotate(
             bid_count=Count("bids"), lowest_price=Min("bids__price")
         ).order_by("-created_at", "-pk")
         page = Paginator(tenders, 25).get_page(request.GET.get("page"))
@@ -961,7 +961,14 @@ def supplier_detail(request, application_pk):
         customer__memberships__user=request.user,
         customer__memberships__is_active=True,
     )
-    return render(request, "procurement/supplier_detail.html", {"application": application})
+    bids = Bid.objects.filter(
+        supplier__profile__organization=application.organization,
+        tender__organization=application.customer,
+    ).select_related("tender", "supplier__profile").order_by("-updated_at", "-pk")
+    return render(request, "procurement/supplier_detail.html", {
+        "application": application,
+        "bids": bids,
+    })
 
 
 @login_required

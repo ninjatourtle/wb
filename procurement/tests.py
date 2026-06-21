@@ -607,6 +607,17 @@ class ProcurementFlowTests(TestCase):
         self.assertNotContains(default_response, completed.title)
         self.assertContains(completed_response, completed.title)
 
+    def test_customer_dashboard_shows_preselected_supplier(self):
+        bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        self.tender.pending_winner = bid
+        self.tender.save(update_fields=["pending_winner"])
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertContains(response, "Предварительно выбран")
+        self.assertContains(response, self.supplier.profile.company_name)
+
     def test_customer_dashboard_paginates_tenders(self):
         for index in range(25):
             Tender.objects.create(
@@ -720,6 +731,18 @@ class ProcurementFlowTests(TestCase):
             self.client.get(reverse("supplier_document_download", args=[document.pk])).status_code,
             403,
         )
+
+    def test_supplier_detail_shows_company_bids_for_customer(self):
+        bid = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        application = self.supplier.profile.organization.supplier_applications.get(
+            customer=self.customer.profile.organization
+        )
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.get(reverse("supplier_detail", args=[application.pk]))
+
+        self.assertContains(response, "Заявки поставщика")
+        self.assertContains(response, bid.tender.title)
 
     def test_supplier_rejection_stores_customer_comment(self):
         application = self.supplier.profile.organization.supplier_applications.get(
