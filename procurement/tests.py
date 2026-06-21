@@ -85,6 +85,29 @@ class ProcurementFlowTests(TestCase):
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.assertTrue(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
 
+    def test_external_document_uses_internal_redirect(self):
+        source = TenderImportSource.objects.create(
+            name="External documents", url="https://example.com/tenders",
+            organization=self.customer.profile.organization, owner=self.customer,
+        )
+        external_url = "https://files.example.test/document.pdf"
+        ImportedTender.objects.create(
+            source=source, external_id="external-doc-1", tender=self.tender,
+            raw_data={"details": {"documents": [{
+                "title": "Техническое задание", "extension": "pdf", "url": external_url,
+            }]}},
+        )
+
+        detail = self.client.get(self.tender.get_absolute_url())
+        internal_url = reverse("external_document_redirect", args=[self.tender.pk, 0])
+        redirect_response = self.client.get(internal_url)
+
+        self.assertContains(detail, internal_url)
+        self.assertNotContains(detail, external_url)
+        self.assertEqual(redirect_response.status_code, 302)
+        self.assertEqual(redirect_response["Location"], external_url)
+        self.assertEqual(redirect_response["Referrer-Policy"], "no-referrer")
+
     def test_supplier_cannot_create_tender(self):
         self.client.login(username="supplier", password="testpass123")
         response = self.client.get(reverse("tender_create"))
@@ -860,6 +883,26 @@ class TenderImportTests(TestCase):
 
         self.assertEqual(result["unchanged"], 1)
         self.assertEqual(ImportedTender.objects.count(), 1)
+
+    @patch("procurement.imports.enrich_bidzaar_item")
+    @patch("procurement.imports.fetch_source_items")
+    def test_bidzaar_zero_budget_does_not_replace_assigned_budget(
+        self, fetch_source_items, enrich_bidzaar_item
+    ):
+        fetch_source_items.return_value = [self.item]
+        sync_source(self.source)
+        tender = Tender.objects.get(number="EXT-42")
+        tender.budget = 750000
+        tender.save(update_fields=["budget"])
+
+        self.source.adapter = TenderImportSource.Adapter.BIDZAAR
+        self.source.save(update_fields=["adapter"])
+        enrich_bidzaar_item.return_value = {**self.item, "budget": "0"}
+
+        sync_source(self.source)
+
+        tender.refresh_from_db()
+        self.assertEqual(tender.budget, 750000)
 
     @patch("procurement.imports.fetch_source_items")
     def test_missing_tender_is_cancelled_only_when_enabled(self, fetch_source_items):

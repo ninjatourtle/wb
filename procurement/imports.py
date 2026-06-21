@@ -484,6 +484,15 @@ def sync_item(source, item):
 
     changed_fields = []
     for field, value in defaults.items():
+        # Bidzaar does not always publish an expected price. Preserve a budget
+        # assigned in TenderFlow instead of replacing it with a source zero.
+        if (
+            field == "budget"
+            and source.adapter == TenderImportSource.Adapter.BIDZAAR
+            and value == Decimal("0")
+            and tender.budget > Decimal("0")
+        ):
+            continue
         if getattr(tender, field) != value:
             setattr(tender, field, value)
             changed_fields.append(field)

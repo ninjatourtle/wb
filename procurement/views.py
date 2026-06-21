@@ -1,5 +1,6 @@
 from datetime import timedelta
 from functools import wraps
+from urllib.parse import urlparse
 
 from django.contrib import messages
 from django.contrib.auth import login
@@ -9,7 +10,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.db.models import Count, Min, Q, Sum
-from django.http import FileResponse, Http404, HttpResponse, JsonResponse
+from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -886,6 +887,31 @@ def document_download(request, document_pk):
         raise PermissionDenied
     audit(request.user, "document.downloaded", document)
     return FileResponse(document.file.open("rb"), as_attachment=True, filename=document.file.name.rsplit("/", 1)[-1])
+
+
+def external_document_redirect(request, tender_pk, document_index):
+    tender = get_object_or_404(
+        Tender.objects.select_related("import_record"), pk=tender_pk
+    )
+    if tender.status in {Tender.Status.DRAFT, Tender.Status.APPROVAL} and not tender.user_can_review(request.user):
+        raise PermissionDenied
+    imported_data = tender.import_record.raw_data if hasattr(tender, "import_record") else {}
+    documents = imported_data.get("details", {}).get("documents", [])
+    try:
+        document = documents[document_index]
+        url = document["url"]
+    except (IndexError, KeyError, TypeError):
+        raise Http404
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise Http404
+    audit(
+        request.user, "external_document.redirected", tender,
+        document_title=document.get("title", ""),
+    )
+    response = HttpResponseRedirect(url)
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @login_required
