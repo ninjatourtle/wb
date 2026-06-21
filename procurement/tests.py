@@ -159,6 +159,17 @@ class ProcurementFlowTests(TestCase):
         self.assertContains(response, "без раскрытия поставщика")
         self.assertNotContains(response, self.supplier.profile.company_name)
 
+    def test_auction_without_bids_shows_starting_budget(self):
+        self.tender.procedure = Tender.Procedure.AUCTION
+        self.tender.save(update_fields=["procedure"])
+        self.client.login(username="customer", password="testpass123")
+
+        response = self.client.get(self.tender.get_absolute_url())
+
+        self.assertContains(response, "Пока нет предложений")
+        self.assertContains(response, "Стартовый бюджет")
+        self.assertContains(response, "100000")
+
     def test_auction_bid_must_beat_best_price(self):
         self.tender.procedure = Tender.Procedure.AUCTION
         self.tender.auction_step = 5000

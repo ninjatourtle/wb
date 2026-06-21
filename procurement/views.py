@@ -148,6 +148,7 @@ def home(request):
         {"value": row["category"], "label": category_labels[row["category"]], "count": row["count"]}
         for row in open_tenders.values("category").annotate(count=Count("pk")).order_by("-count")
     ]
+    category_stats.sort(key=lambda item: (item["value"] != Tender.Category.GOODS, -item["count"]))
     return render(request, "procurement/home.html", {
         "tenders": tenders, "stats": stats, "category_stats": category_stats,
     })
