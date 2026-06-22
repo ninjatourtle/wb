@@ -421,6 +421,27 @@ class ProcurementFlowTests(TestCase):
 
         self.assertTrue(BidFraudSignal.objects.filter(bid=first, related_bid=second, kind=BidFraudSignal.Kind.DEVICE_FINGERPRINT).exists())
 
+    def test_customer_sees_access_data_and_fraud_signals_in_supplier_card(self):
+        first = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        other = User.objects.create_user("supplier-card-fraud", password="testpass123")
+        other_org = Organization.objects.create(name="Связанная для карточки", kind=Organization.Kind.SUPPLIER)
+        Profile.objects.create(user=other, company_name="Связанная для карточки", role=Profile.Role.SUPPLIER, organization=other_org)
+        SupplierApplication.objects.create(organization=other_org, customer=self.customer.profile.organization, status=SupplierApplication.Status.APPROVED)
+        second = Bid.objects.create(tender=self.tender, supplier=other, price=89000, delivery_days=9)
+        fingerprint = "c" * 64
+        LoginEvent.objects.create(user=self.supplier, username=self.supplier.username, ip_address="198.51.100.24", success=True, device_fingerprint=fingerprint)
+        LoginEvent.objects.create(user=other, username=other.username, ip_address="198.51.100.24", success=True, device_fingerprint=fingerprint)
+        from .services import refresh_bid_fraud_signals
+
+        refresh_bid_fraud_signals(self.tender.pk)
+        application = SupplierApplication.objects.get(organization=self.supplier.profile.organization, customer=self.customer.profile.organization)
+        self.client.login(username="customer", password="testpass123")
+        response = self.client.get(reverse("supplier_detail", args=[application.pk]))
+
+        self.assertContains(response, "IP и отпечатки устройств")
+        self.assertContains(response, "198.51.100.24")
+        self.assertContains(response, "Совпадающий отпечаток устройства")
+
     def test_rejected_supplier_can_resubmit_application(self):
         application = self.supplier.profile.organization.supplier_applications.get(
             customer=self.customer.profile.organization

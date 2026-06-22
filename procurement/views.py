@@ -1001,9 +1001,17 @@ def supplier_detail(request, application_pk):
         supplier__profile__organization=application.organization,
         tender__organization=application.customer,
     ).select_related("tender", "supplier__profile").order_by("-updated_at", "-pk")
+    supplier_users = User.objects.filter(profile__organization=application.organization)
+    login_events = LoginEvent.objects.filter(user__in=supplier_users).order_by("-created_at")[:20]
+    fraud_signals = BidFraudSignal.objects.filter(
+        bid__supplier__profile__organization=application.organization,
+        tender__organization=application.customer,
+    ).select_related("tender", "related_bid__supplier__profile").order_by("-created_at")
     return render(request, "procurement/supplier_detail.html", {
         "application": application,
         "bids": bids,
+        "login_events": login_events,
+        "fraud_signals": fraud_signals,
     })
 
 
