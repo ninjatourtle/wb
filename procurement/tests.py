@@ -18,6 +18,7 @@ from .imports import fetch_bidzaar_items, run_source_sync, sync_source
 from .services import notification_email_body
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ProcurementFlowTests(TestCase):
     def setUp(self):
         self.customer = User.objects.create_user("customer", password="testpass123")
