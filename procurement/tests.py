@@ -368,22 +368,29 @@ class ProcurementFlowTests(TestCase):
         other_org = Organization.objects.create(name="Второй", kind=Organization.Kind.SUPPLIER)
         Profile.objects.create(user=other, company_name="Второй", role=Profile.Role.SUPPLIER, organization=other_org)
         second = Bid.objects.create(tender=self.tender, supplier=other, price=85000, delivery_days=9)
+        third_user = User.objects.create_user("third-supplier", password="testpass123")
+        third_org = Organization.objects.create(name="Третий", kind=Organization.Kind.SUPPLIER)
+        Profile.objects.create(user=third_user, company_name="Третий", role=Profile.Role.SUPPLIER, organization=third_org)
+        third = Bid.objects.create(tender=self.tender, supplier=third_user, price=84000, delivery_days=8)
         self.tender.deadline = timezone.now() - timedelta(days=1)
         self.tender.status = Tender.Status.REVIEW
         self.tender.save()
         self.client.login(username="customer", password="testpass123")
         self.client.post(reverse("select_winner", args=[self.tender.pk, first.pk]))
-        response = self.client.post(reverse("select_winner", args=[self.tender.pk, second.pk]))
+        self.client.post(reverse("select_winner", args=[self.tender.pk, second.pk]))
+        response = self.client.post(reverse("select_winner", args=[self.tender.pk, third.pk]))
         self.assertRedirects(response, self.tender.get_absolute_url())
-        self.assertEqual(TenderWinnerSelection.objects.filter(tender=self.tender).count(), 2)
+        self.assertEqual(TenderWinnerSelection.objects.filter(tender=self.tender).count(), 3)
         from .tasks import finalize_preselected_winners
 
         self.assertEqual(finalize_preselected_winners(), 1)
-        self.assertEqual(Contract.objects.filter(tender=self.tender).count(), 2)
+        self.assertEqual(Contract.objects.filter(tender=self.tender).count(), 3)
         first.refresh_from_db()
         second.refresh_from_db()
         self.assertEqual(first.status, Bid.Status.WINNER)
         self.assertEqual(second.status, Bid.Status.WINNER)
+        third.refresh_from_db()
+        self.assertEqual(third.status, Bid.Status.WINNER)
 
     def test_fraud_signals_detect_shared_supplier_phone(self):
         first = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
@@ -398,6 +405,21 @@ class ProcurementFlowTests(TestCase):
         refresh_bid_fraud_signals(self.tender.pk)
 
         self.assertTrue(BidFraudSignal.objects.filter(bid=first, related_bid=second, kind=BidFraudSignal.Kind.PHONE).exists())
+
+    def test_fraud_signals_detect_shared_device_fingerprint(self):
+        first = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        other = User.objects.create_user("fingerprint-supplier", password="testpass123")
+        other_org = Organization.objects.create(name="Поставщик с устройством", kind=Organization.Kind.SUPPLIER)
+        Profile.objects.create(user=other, company_name="Поставщик с устройством", role=Profile.Role.SUPPLIER, organization=other_org)
+        second = Bid.objects.create(tender=self.tender, supplier=other, price=89000, delivery_days=9)
+        fingerprint = "a" * 64
+        LoginEvent.objects.create(user=self.supplier, username=self.supplier.username, success=True, device_fingerprint=fingerprint)
+        LoginEvent.objects.create(user=other, username=other.username, success=True, device_fingerprint=fingerprint)
+        from .services import refresh_bid_fraud_signals
+
+        refresh_bid_fraud_signals(self.tender.pk)
+
+        self.assertTrue(BidFraudSignal.objects.filter(bid=first, related_bid=second, kind=BidFraudSignal.Kind.DEVICE_FINGERPRINT).exists())
 
     def test_rejected_supplier_can_resubmit_application(self):
         application = self.supplier.profile.organization.supplier_applications.get(
@@ -427,8 +449,9 @@ class ProcurementFlowTests(TestCase):
         failed = self.client.post(reverse("login"), {"username": "customer", "password": "wrong"})
         self.assertEqual(failed.status_code, 200)
         self.assertTrue(LoginEvent.objects.filter(username="customer", success=False).exists())
-        self.client.post(reverse("login"), {"username": "customer", "password": "testpass123"})
-        self.assertTrue(LoginEvent.objects.filter(user=self.customer, success=True).exists())
+        fingerprint = "b" * 64
+        self.client.post(reverse("login"), {"username": "customer", "password": "testpass123", "device_fingerprint": fingerprint})
+        self.assertTrue(LoginEvent.objects.filter(user=self.customer, success=True, device_fingerprint=fingerprint).exists())
 
     def test_operations_dashboard_is_staff_only(self):
         self.client.login(username="customer", password="testpass123")

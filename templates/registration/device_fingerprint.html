@@ -1,0 +1,11 @@
+<script>
+(() => {
+  const fields = document.querySelectorAll('[data-device-fingerprint]');
+  if (!fields.length || !window.crypto?.subtle) return;
+  const source = [navigator.userAgent, navigator.language, navigator.platform, screen.width, screen.height, screen.colorDepth, Intl.DateTimeFormat().resolvedOptions().timeZone, navigator.hardwareConcurrency || '', navigator.deviceMemory || ''].join('|');
+  window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(source)).then((digest) => {
+    const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    fields.forEach((field) => { field.value = fingerprint; });
+  }).catch(() => {});
+})();
+</script>

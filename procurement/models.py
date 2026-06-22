@@ -421,6 +421,7 @@ class LoginEvent(models.Model):
     username = models.CharField(max_length=150, blank=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.CharField(max_length=500, blank=True)
+    device_fingerprint = models.CharField(max_length=64, blank=True, db_index=True)
     success = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -552,6 +553,7 @@ class BidFraudSignal(models.Model):
         PHONE = "shared_phone", "Одинаковый телефон"
         ADDRESS = "shared_address", "Одинаковый юридический адрес"
         LOGIN_IP = "shared_login_ip", "Общий IP входа"
+        DEVICE_FINGERPRINT = "shared_device_fingerprint", "Совпадающий отпечаток устройства"
 
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="fraud_signals")
     bid = models.ForeignKey(Bid, on_delete=models.CASCADE, related_name="fraud_signals")

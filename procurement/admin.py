@@ -276,8 +276,8 @@ class AuditEventAdmin(BaseAdmin):
 
 @admin.register(LoginEvent)
 class LoginEventAdmin(BaseAdmin):
-    list_display = ("created_at", "username", "user", "ip_address", "success")
+    list_display = ("created_at", "username", "user", "ip_address", "device_fingerprint", "success")
     list_filter = ("success", "created_at")
     search_fields = ("username", "user__username", "ip_address")
-    readonly_fields = ("user", "username", "ip_address", "user_agent", "success", "created_at")
+    readonly_fields = ("user", "username", "ip_address", "user_agent", "device_fingerprint", "success", "created_at")
     date_hierarchy = "created_at"

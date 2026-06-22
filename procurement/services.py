@@ -62,6 +62,8 @@ def refresh_bid_fraud_signals(tender_id):
         )
         first_ips = set(LoginEvent.objects.filter(user=first.supplier).exclude(ip_address__isnull=True).values_list("ip_address", flat=True))
         second_ips = set(LoginEvent.objects.filter(user=second.supplier).exclude(ip_address__isnull=True).values_list("ip_address", flat=True))
+        first_fingerprints = set(LoginEvent.objects.filter(user=first.supplier, success=True).exclude(device_fingerprint="").values_list("device_fingerprint", flat=True))
+        second_fingerprints = set(LoginEvent.objects.filter(user=second.supplier, success=True).exclude(device_fingerprint="").values_list("device_fingerprint", flat=True))
         shared_ips = first_ips & second_ips
         for kind, first_value, second_value in checks:
             if first_value and first_value == second_value:
@@ -73,6 +75,11 @@ def refresh_bid_fraud_signals(tender_id):
             created.extend([
                 BidFraudSignal(tender=tender, bid=first, related_bid=second, kind=BidFraudSignal.Kind.LOGIN_IP, value=str(ip)),
                 BidFraudSignal(tender=tender, bid=second, related_bid=first, kind=BidFraudSignal.Kind.LOGIN_IP, value=str(ip)),
+            ])
+        for fingerprint in first_fingerprints & second_fingerprints:
+            created.extend([
+                BidFraudSignal(tender=tender, bid=first, related_bid=second, kind=BidFraudSignal.Kind.DEVICE_FINGERPRINT, value=fingerprint),
+                BidFraudSignal(tender=tender, bid=second, related_bid=first, kind=BidFraudSignal.Kind.DEVICE_FINGERPRINT, value=fingerprint),
             ])
     BidFraudSignal.objects.bulk_create(created, ignore_conflicts=True)
     return len(created)

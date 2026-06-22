@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth.signals import user_logged_in, user_login_failed
 from django.dispatch import receiver
 
@@ -15,6 +17,13 @@ def _user_agent(request):
     return request.META.get("HTTP_USER_AGENT", "")[:500] if request else ""
 
 
+def _device_fingerprint(request):
+    if not request:
+        return ""
+    value = (request.POST.get("device_fingerprint") or request.headers.get("X-Device-Fingerprint") or "").lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else ""
+
+
 @receiver(user_logged_in)
 def record_successful_login(sender, request, user, **kwargs):
     LoginEvent.objects.create(
@@ -22,6 +31,7 @@ def record_successful_login(sender, request, user, **kwargs):
         username=user.get_username(),
         ip_address=_client_ip(request),
         user_agent=_user_agent(request),
+        device_fingerprint=_device_fingerprint(request),
         success=True,
     )
 
@@ -33,5 +43,6 @@ def record_failed_login(sender, credentials, request, **kwargs):
         username=username,
         ip_address=_client_ip(request),
         user_agent=_user_agent(request),
+        device_fingerprint=_device_fingerprint(request),
         success=False,
     )
