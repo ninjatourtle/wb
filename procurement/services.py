@@ -81,7 +81,9 @@ def refresh_bid_fraud_signals(tender_id):
 @transaction.atomic
 def finalize_pending_winner(tender_id):
     """Publish every preselected winner on the calendar day after the bid deadline."""
-    tender = Tender.objects.select_for_update().select_related(
+    # Lock only the tender row. `pending_winner` and the user links are nullable,
+    # and PostgreSQL cannot lock the nullable side of an outer join.
+    tender = Tender.objects.select_for_update(of=("self",)).select_related(
         "pending_winner__supplier__profile", "organization", "winner_selected_by", "owner"
     ).get(pk=tender_id)
     selections = list(tender.winner_selections.select_related("bid__supplier__profile").all())
