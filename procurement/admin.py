@@ -2,9 +2,9 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.models import User
 from .models import (
-    AuditEvent, Bid, BidLot, Contract, LoginEvent, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
+    AuditEvent, Bid, BidFraudSignal, BidLot, Contract, LoginEvent, Membership, Notification, Organization, ProcurementProtocol, Profile, Question,
     ImportedTender, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
-    TenderImportRun, TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot,
+    TenderImportRun, TenderImportSource, TenderLot, TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderWinnerSelection,
 )
 
 admin.site.site_header = "WB Tender — администрирование"
@@ -14,6 +14,7 @@ admin.site.index_title = "Управление закупочной площад
 ADMIN_MODEL_NAMES = {
     AuditEvent: ("событие аудита", "события аудита"),
     Bid: ("предложение", "предложения"),
+    BidFraudSignal: ("антифрод-сигнал", "антифрод-сигналы"),
     BidLot: ("предложение по лоту", "предложения по лотам"),
     Contract: ("договор", "договоры"),
     ImportedTender: ("импортированная закупка", "импортированные закупки"),
@@ -35,6 +36,7 @@ ADMIN_MODEL_NAMES = {
     TenderNumberSequence: ("счетчик номеров", "счетчики номеров"),
     TenderTemplate: ("шаблон закупки", "шаблоны закупок"),
     TenderTemplateLot: ("лот шаблона", "лоты шаблонов"),
+    TenderWinnerSelection: ("выбранный победитель", "выбранные победители"),
 }
 for model, (singular, plural) in ADMIN_MODEL_NAMES.items():
     model._meta.verbose_name = singular
@@ -116,6 +118,14 @@ class BidAdmin(BaseAdmin):
     inlines = (BidLotInline,)
 
 
+@admin.register(BidFraudSignal)
+class BidFraudSignalAdmin(BaseAdmin):
+    list_display = ("tender", "bid", "related_bid", "kind", "created_at")
+    list_filter = ("kind", "tender__organization", "created_at")
+    search_fields = ("tender__number", "bid__supplier__username", "related_bid__supplier__username", "value")
+    list_select_related = ("tender", "bid", "related_bid")
+
+
 @admin.register(Organization)
 class OrganizationAdmin(BaseAdmin):
     list_display = ("name", "kind", "inn", "contact_email", "phone", "created_at")
@@ -171,6 +181,14 @@ class TenderApprovalAdmin(BaseAdmin):
     list_filter = ("decision", "requested_at")
     search_fields = ("tender__number", "tender__title", "requested_by__username", "reviewer__username")
     list_select_related = ("tender", "requested_by", "reviewer")
+
+
+@admin.register(TenderWinnerSelection)
+class TenderWinnerSelectionAdmin(BaseAdmin):
+    list_display = ("tender", "bid", "selected_by", "selected_at")
+    list_filter = ("tender__organization", "selected_at")
+    search_fields = ("tender__number", "bid__supplier__username", "bid__supplier__profile__company_name")
+    list_select_related = ("tender", "bid", "selected_by")
 
 
 @admin.register(ProcurementProtocol)

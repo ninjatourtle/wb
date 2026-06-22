@@ -50,4 +50,5 @@ urlpatterns = [
     path("approvals/<int:approval_pk>/<str:decision>/", views.review_tender, name="review_tender"),
     path("documents/<int:document_pk>/download/", views.document_download, name="document_download"),
     path("tenders/<int:tender_pk>/winner/<int:bid_pk>/", views.select_winner, name="select_winner"),
+    path("tenders/<int:tender_pk>/winner/<int:bid_pk>/remove/", views.unselect_winner, name="unselect_winner"),
 ]

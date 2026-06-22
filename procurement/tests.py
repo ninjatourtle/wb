@@ -3,14 +3,15 @@ from decimal import Decimal
 from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.template import Context, Template
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
-    AuditEvent, Bid, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
+    AuditEvent, Bid, BidFraudSignal, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile, SupplierApplication,
     ImportedTender, SupplierDocument, Tender, TenderApproval, TenderDocument, TenderImportRun, TenderImportSource,
-    TenderLot, TenderTemplate,
+    TenderLot, TenderTemplate, TenderWinnerSelection,
 )
 from .forms import TenderDocumentForm, TenderForm
 from .imports import fetch_bidzaar_items, run_source_sync, sync_source
@@ -79,6 +80,11 @@ class ProcurementFlowTests(TestCase):
 
         tenders = list(response.context["tenders"])
         self.assertLess(tenders.index(newer), tenders.index(older))
+
+    def test_money_format_groups_thousands_and_keeps_fraction(self):
+        rendered = Template("{{ value|money }}").render(Context({"value": Decimal("1234567.5")}))
+
+        self.assertIn("1\u00a0234\u00a0567,50\u00a0₽", rendered)
 
     def test_catalog_explains_next_step_for_new_supplier(self):
         response = self.client.get(reverse("tender_list"))
@@ -355,22 +361,42 @@ class ProcurementFlowTests(TestCase):
         self.assertRedirects(response, self.tender.get_absolute_url())
         self.assertFalse(Bid.objects.filter(tender=self.tender, supplier=self.supplier).exists())
 
-    def test_winner_cannot_be_selected_twice(self):
+    def test_multiple_winners_receive_separate_contracts(self):
         first = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
         other = User.objects.create_user("second-supplier", password="testpass123")
         other_org = Organization.objects.create(name="Второй", kind=Organization.Kind.SUPPLIER)
         Profile.objects.create(user=other, company_name="Второй", role=Profile.Role.SUPPLIER, organization=other_org)
         second = Bid.objects.create(tender=self.tender, supplier=other, price=85000, delivery_days=9)
-        self.tender.deadline = timezone.now() - timedelta(minutes=1)
+        self.tender.deadline = timezone.now() - timedelta(days=1)
         self.tender.status = Tender.Status.REVIEW
         self.tender.save()
         self.client.login(username="customer", password="testpass123")
         self.client.post(reverse("select_winner", args=[self.tender.pk, first.pk]))
         response = self.client.post(reverse("select_winner", args=[self.tender.pk, second.pk]))
         self.assertRedirects(response, self.tender.get_absolute_url())
-        self.assertEqual(Contract.objects.filter(tender=self.tender).count(), 1)
+        self.assertEqual(TenderWinnerSelection.objects.filter(tender=self.tender).count(), 2)
+        from .tasks import finalize_preselected_winners
+
+        self.assertEqual(finalize_preselected_winners(), 1)
+        self.assertEqual(Contract.objects.filter(tender=self.tender).count(), 2)
         first.refresh_from_db()
+        second.refresh_from_db()
         self.assertEqual(first.status, Bid.Status.WINNER)
+        self.assertEqual(second.status, Bid.Status.WINNER)
+
+    def test_fraud_signals_detect_shared_supplier_phone(self):
+        first = Bid.objects.create(tender=self.tender, supplier=self.supplier, price=90000, delivery_days=10)
+        self.supplier.profile.organization.phone = "+79990000000"
+        self.supplier.profile.organization.save(update_fields=["phone"])
+        other = User.objects.create_user("affiliated", email="affiliated@example.ru", password="testpass123")
+        other_org = Organization.objects.create(name="Связанная компания", kind=Organization.Kind.SUPPLIER, phone=self.supplier.profile.organization.phone)
+        Profile.objects.create(user=other, company_name="Связанная компания", role=Profile.Role.SUPPLIER, organization=other_org)
+        second = Bid.objects.create(tender=self.tender, supplier=other, price=89000, delivery_days=9)
+        from .services import refresh_bid_fraud_signals
+
+        refresh_bid_fraud_signals(self.tender.pk)
+
+        self.assertTrue(BidFraudSignal.objects.filter(bid=first, related_bid=second, kind=BidFraudSignal.Kind.PHONE).exists())
 
     def test_rejected_supplier_can_resubmit_application(self):
         application = self.supplier.profile.organization.supplier_applications.get(

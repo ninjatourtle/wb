@@ -28,11 +28,12 @@ from .forms import (
     TenderForm, TenderLotForm, TenderTemplateForm, bid_lot_formset,
 )
 from .models import (
-    AuditEvent, Bid, BidLot, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile,
+    AuditEvent, Bid, BidFraudSignal, BidLot, Contract, LoginEvent, Membership, Organization, ProcurementProtocol, Profile,
     Question, SupplierApplication, SupplierDocument, Tender, TenderApproval, TenderDocument,
     TenderImportRun, TenderImportSource, TenderNumberSequence, TenderTemplate, TenderTemplateLot, TenderLot,
+    TenderWinnerSelection,
 )
-from .services import notify_user
+from .services import notify_user, refresh_bid_fraud_signals
 
 
 def audit(user, action, obj=None, organization=None, **details):
@@ -310,12 +311,19 @@ def tender_detail(request, pk):
 def tender_comparison(request, pk):
     tender = manageable_tender_or_404(request.user, pk)
     rows = comparison_rows(tender)
+    selected_bid_ids = set(tender.winner_selections.values_list("bid_id", flat=True))
     applications = {
         application.organization_id: application.pk
         for application in SupplierApplication.objects.filter(customer=tender.organization)
     }
     for row in rows:
         row["supplier_application_id"] = applications.get(row["bid"].supplier.profile.organization_id)
+    signals_by_bid = {}
+    for signal in BidFraudSignal.objects.filter(tender=tender).select_related("related_bid__supplier__profile"):
+        signals_by_bid.setdefault(signal.bid_id, []).append(signal)
+    for row in rows:
+        row["fraud_signals"] = signals_by_bid.get(row["bid"].pk, [])
+        row["is_selected"] = row["bid"].pk in selected_bid_ids
     status = request.GET.get("status", "")
     lots = request.GET.get("lots", "")
     score_from = request.GET.get("score_from", "").strip()
@@ -341,6 +349,7 @@ def tender_comparison(request, pk):
         "lots": lots,
         "score_from": score_from,
         "bid_statuses": Bid.Status.choices,
+        "selected_count": len(selected_bid_ids),
     })
 
 
@@ -548,6 +557,7 @@ def tender_cancel(request, pk):
     tender.status = Tender.Status.CANCELLED
     tender.pending_winner = None
     tender.save(update_fields=["status", "pending_winner"])
+    tender.winner_selections.all().delete()
     ProcurementProtocol.objects.create(
         tender=tender,
         kind=ProcurementProtocol.Kind.CANCELLATION,
@@ -607,6 +617,9 @@ def bid_submit(request, pk):
                 lot_formset.instance = new_bid
                 lot_formset.save()
             audit(request.user, "bid.submitted", new_bid, price=str(new_bid.price))
+            signal_count = refresh_bid_fraud_signals(tender.pk)
+            if signal_count:
+                audit(request.user, "bid.fraud_signals_detected", new_bid, signal_count=signal_count)
             notify_user(tender.owner, f"Новое предложение: {tender.number}", url=tender.get_absolute_url())
             messages.success(request, "Предложение сохранено.")
             return redirect(tender)
@@ -750,20 +763,28 @@ def select_winner(request, tender_pk, bid_pk):
         messages.error(request, "Для этой закупки победитель уже выбран или процедура отменена.")
         return redirect(tender)
     bid = get_object_or_404(Bid, pk=bid_pk, tender=tender, status=Bid.Status.SUBMITTED)
-    tender.pending_winner = bid
-    tender.winner_selected_by = request.user
-    tender.winner_selected_at = timezone.now()
-    tender.save(update_fields=["pending_winner", "winner_selected_by", "winner_selected_at"])
     ranking = comparison_rows(tender)
     winner_ranking = next((row for row in ranking if row["bid"].pk == bid.pk), None)
-    tender.winner_ranking_snapshot = {
+    snapshot = {
         "total_score": str(winner_ranking["score"]) if winner_ranking else None,
         "price_score": str(winner_ranking["price_score"]) if winner_ranking else None,
         "delivery_score": str(winner_ranking["delivery_score"]) if winner_ranking else None,
         "warranty_score": str(winner_ranking["warranty_score"]) if winner_ranking else None,
         "weights": {"price": 60, "delivery": 25, "warranty": 15},
     }
-    tender.save(update_fields=["winner_ranking_snapshot"])
+    selection, created = TenderWinnerSelection.objects.get_or_create(
+        tender=tender, bid=bid,
+        defaults={"selected_by": request.user, "ranking_snapshot": snapshot},
+    )
+    if not created:
+        messages.info(request, "Этот поставщик уже выбран предварительно.")
+        return redirect(tender)
+    first_selection = tender.winner_selections.order_by("selected_at").first()
+    tender.pending_winner = first_selection.bid
+    tender.winner_selected_by = request.user
+    tender.winner_selected_at = timezone.now()
+    tender.winner_ranking_snapshot = snapshot
+    tender.save(update_fields=["pending_winner", "winner_selected_by", "winner_selected_at", "winner_ranking_snapshot"])
     audit(
         request.user, "winner.preselected", bid,
         ranking_score=str(winner_ranking["score"]) if winner_ranking else None,
@@ -775,6 +796,21 @@ def select_winner(request, tender_pk, bid_pk):
         "Статусы заявок, протокол и договор будут опубликованы на следующий календарный день после дедлайна.",
     )
     return redirect(tender)
+
+
+@membership_role_required(Membership.Role.OWNER, Membership.Role.MANAGER)
+def unselect_winner(request, tender_pk, bid_pk):
+    if request.method != "POST":
+        raise PermissionDenied
+    tender = manageable_tender_or_404(request.user, tender_pk)
+    selection = get_object_or_404(TenderWinnerSelection, tender=tender, bid_id=bid_pk)
+    selection.delete()
+    first_selection = tender.winner_selections.order_by("selected_at").first()
+    tender.pending_winner = first_selection.bid if first_selection else None
+    tender.save(update_fields=["pending_winner"])
+    audit(request.user, "winner.unselected", tender, bid_id=bid_pk)
+    messages.success(request, "Предварительный выбор поставщика отменен.")
+    return redirect("tender_comparison", pk=tender.pk)
 
 
 @login_required

@@ -473,7 +473,7 @@ class Contract(models.Model):
         TERMINATED = "terminated", "Расторгнут"
 
     number = models.CharField("Номер договора", max_length=50, unique=True)
-    tender = models.OneToOneField(Tender, on_delete=models.PROTECT, related_name="contract")
+    tender = models.ForeignKey(Tender, on_delete=models.PROTECT, related_name="contracts")
     winning_bid = models.OneToOneField("Bid", on_delete=models.PROTECT, related_name="contract")
     customer = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="customer_contracts")
     supplier = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="supplier_contracts")
@@ -531,6 +531,40 @@ class Bid(models.Model):
 
     def __str__(self):
         return f"{self.supplier} → {self.tender.number}"
+
+
+class TenderWinnerSelection(models.Model):
+    """A preselected offer. A tender can legitimately result in several contracts."""
+
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="winner_selections")
+    bid = models.OneToOneField(Bid, on_delete=models.CASCADE, related_name="winner_selection")
+    selected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="winner_selections")
+    selected_at = models.DateTimeField(auto_now_add=True)
+    ranking_snapshot = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["selected_at"]
+
+
+class BidFraudSignal(models.Model):
+    class Kind(models.TextChoices):
+        EMAIL = "shared_email", "Одинаковый email"
+        PHONE = "shared_phone", "Одинаковый телефон"
+        ADDRESS = "shared_address", "Одинаковый юридический адрес"
+        LOGIN_IP = "shared_login_ip", "Общий IP входа"
+
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="fraud_signals")
+    bid = models.ForeignKey(Bid, on_delete=models.CASCADE, related_name="fraud_signals")
+    related_bid = models.ForeignKey(Bid, on_delete=models.CASCADE, related_name="related_fraud_signals")
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+    value = models.CharField(max_length=300, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["bid", "related_bid", "kind"], name="unique_bid_fraud_signal")
+        ]
+        ordering = ["bid_id", "kind"]
 
 
 class BidLot(models.Model):
